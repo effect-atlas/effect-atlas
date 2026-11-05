@@ -1,0 +1,366 @@
+/* Pixel Wipe Button: styles for the effect. mountPixelWipeButton() adds the .pixel-wipe-button class to your element; give that element a size. */
+.pixel-wipe-button {
+  --accent: var(--fx-accent);
+  --fx-accent: #4559ff;
+  --fx-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --fx-hair: rgba(23, 24, 26, 0.1);
+  --fx-ink: #17181a;
+  --fx-ink-3: #9a9993;
+  --fx-object: #fff;
+  --fx-wash: rgba(23, 24, 26, 0.06);
+  --font: var(--fx-font);
+  --hair: var(--fx-hair);
+  --ink: var(--fx-ink);
+  --ink-3: var(--fx-ink-3);
+  --object: var(--fx-object);
+}
+.pixel-wipe-button {
+  position: relative;
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--fx-wash);
+  isolation: isolate;
+  -webkit-user-select: none;
+  user-select: none;
+  font: 400 15px/1.5 var(--font);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+.pixel-wipe-button,
+.pixel-wipe-button *,
+.pixel-wipe-button *::before,
+.pixel-wipe-button *::after {
+  box-sizing: border-box;
+}
+.cr-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.pixel-wipe-button::before {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, rgba(23, 24, 26, 0.1) 1px, transparent 1.6px) center / 22px 22px;
+}
+.fx-board {
+  position: absolute;
+  inset: 0;
+}
+.dc-cursor {
+  --dc-ink: var(--ink, #17181a);
+  --dc-hair: var(--hair, rgba(23, 24, 26, 0.12));
+  --dc-spring: cubic-bezier(0.28, 1.3, 0.36, 1);
+  --dc-out: cubic-bezier(0.22, 1, 0.36, 1);
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 10;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+.dc-cursor svg {
+  position: absolute;
+  overflow: visible;
+  display: block;
+}
+.dc-body {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  transition: scale 380ms var(--dc-spring);
+}
+.dc-arrow {
+  filter: drop-shadow(0 0.5px 0.6px rgba(23, 24, 26, 0.3)) drop-shadow(0 2px 3px rgba(23, 24, 26, 0.14))
+    drop-shadow(0 7px 12px rgba(23, 24, 26, 0.1));
+  transition: filter 220ms var(--dc-out);
+}
+.dc-arrow path {
+  fill: var(--dc-ink);
+  stroke: #fff;
+  stroke-width: 1.6px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+.dc-cursor[data-down] .dc-body {
+  scale: 0.86;
+  transition: scale 90ms var(--dc-out);
+}
+.dc-cursor[data-down] .dc-arrow,
+.dc-cursor[data-hold] .dc-arrow {
+  filter: drop-shadow(0 0.4px 0.5px rgba(23, 24, 26, 0.32)) drop-shadow(0 1px 2px rgba(23, 24, 26, 0.14))
+    drop-shadow(0 3px 6px rgba(23, 24, 26, 0.06));
+}
+.dc-ripple {
+  position: absolute;
+  left: -20px;
+  top: -20px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1.5px solid var(--dc-ink);
+  background: rgba(23, 24, 26, 0.04);
+  opacity: 0;
+  pointer-events: none;
+  animation: dc-ripple 320ms var(--dc-out) forwards;
+}
+@keyframes dc-ripple {
+  from {
+    scale: 0.25;
+    opacity: 0.4;
+  }
+  to {
+    scale: 1;
+    opacity: 0;
+  }
+}
+.dc-cursor[data-hold] .dc-body {
+  scale: 0.8;
+  transition: scale 200ms var(--dc-out);
+}
+.dc-hold {
+  left: -20px;
+  top: -20px;
+  width: 40px;
+  height: 40px;
+  rotate: -90deg;
+  opacity: 0;
+  scale: 0.7;
+  transition:
+    opacity 180ms var(--dc-out),
+    scale 320ms var(--dc-spring);
+}
+.dc-cursor[data-hold] .dc-hold {
+  opacity: 1;
+  scale: 1;
+}
+.dc-hold circle {
+  fill: none;
+  stroke-width: 2px;
+}
+.dc-hold .dc-hold-bg {
+  fill: rgba(255, 255, 255, 0.55);
+  stroke: none;
+}
+.dc-hold .dc-hold-track {
+  stroke: var(--dc-hair);
+}
+.dc-hold .dc-hold-arc {
+  stroke: var(--dc-ink);
+  stroke-linecap: round;
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 1;
+}
+.dc-cursor[data-hold-done] .dc-hold {
+  animation: dc-hold-done 360ms var(--dc-spring);
+}
+@keyframes dc-hold-done {
+  50% {
+    scale: 1.1;
+  }
+}
+.dc-wheel {
+  left: 13px;
+  top: 17px;
+  width: 22px;
+  height: 32px;
+  opacity: 0;
+  scale: 0.5;
+  transform-origin: 0 0;
+  filter: drop-shadow(0 0.5px 0.6px rgba(23, 24, 26, 0.22)) drop-shadow(0 3px 6px rgba(23, 24, 26, 0.1));
+  transition:
+    opacity 180ms var(--dc-out),
+    scale 300ms var(--dc-spring);
+}
+.dc-cursor[data-wheel] .dc-wheel {
+  opacity: 1;
+  scale: 1;
+}
+.dc-wheel-shell {
+  fill: #fff;
+  stroke: var(--dc-ink);
+  stroke-width: 1.5px;
+}
+.dc-wheel-split {
+  stroke: var(--dc-hair);
+  stroke-width: 1px;
+}
+.dc-wheel-roll {
+  fill: var(--dc-ink);
+}
+.dc-cursor[data-wheel] .dc-wheel-roll {
+  animation: dc-roll 460ms cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+.dc-cursor[data-wheel-up] .dc-wheel-roll {
+  animation-direction: reverse;
+}
+@keyframes dc-roll {
+  0% {
+    translate: 0 -2.5px;
+    opacity: 0.15;
+  }
+  35% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    translate: 0 4.5px;
+    opacity: 0.15;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dc-cursor {
+    display: none;
+  }
+}
+.pw-host [data-pw] {
+  --pw-rest: var(--object, #fff);
+  --pw-rest-ink: var(--ink, #17181a);
+  --pw-fill: var(--ink, #17181a);
+  --pw-fill-ink: #fff;
+  color: var(--pw-rest-ink);
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.pw-host [data-pw][data-tone="solid"] {
+  --pw-rest: var(--ink, #17181a);
+  --pw-rest-ink: #fff;
+  --pw-fill: var(--accent, #4559ff);
+}
+.pw-host [data-pw]:not([data-tone]) {
+  --pw-rest-ink: #fff;
+}
+.pw-host [data-pw]:not([data-tone]) :is(.pw-word, .pw-go) {
+  mix-blend-mode: difference;
+}
+.pw-host [data-pw]:focus-visible {
+  outline: 1px solid var(--ink-3, #9a9993);
+  outline-offset: 4px;
+}
+.pw-face {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.5em;
+  background: var(--pw-rest);
+  box-shadow:
+    0 0 0 1px rgba(23, 24, 26, 0.06),
+    0 2px 8px rgba(23, 24, 26, 0.06);
+  font: 500 1em/1.2 var(--font, Inter, system-ui, sans-serif);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.pw-face[data-pw-state="on"] {
+  background: var(--pw-fill);
+}
+.pw-grain {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+}
+.pw-word {
+  position: relative;
+  z-index: 2;
+  display: block;
+  height: 1.2em;
+  overflow: hidden;
+  margin: 0.95em 1.15em;
+}
+.pw-word-in {
+  display: block;
+  text-shadow: 0 1.2em currentColor;
+}
+.pw-go {
+  position: relative;
+  z-index: 2;
+  align-self: stretch;
+  width: 3em;
+  overflow: hidden;
+}
+.pw-go-track {
+  display: flex;
+  height: 100%;
+  width: 200%;
+  transform: translateX(-50%);
+}
+.pw-go-track i {
+  flex: 1 1 0;
+  display: grid;
+  place-items: center;
+}
+.pw-go svg {
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.pw-scene {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px;
+  width: min(90%, 860px);
+  font-size: clamp(16px, 2.4cqw, 22px);
+}
+.pw-hand {
+  position: absolute;
+  left: -11px;
+  top: -11px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--ink);
+  box-shadow:
+    0 0 0 4px rgba(255, 255, 255, 0.9),
+    0 6px 16px rgba(23, 24, 26, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 8;
+  display: none;
+}
+.pw-host[data-preview="true"] .pw-hand {
+  display: block;
+}
+.pw-row {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+  display: flex;
+  gap: 0.9em;
+  font-size: 28px;
+}
+@media (max-width: 760px) {
+  .pw-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.7em;
+  }
+}

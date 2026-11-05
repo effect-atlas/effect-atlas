@@ -1,0 +1,443 @@
+/* Smear-In Grid: styles for the effect. mountSmearInGrid() adds the .smear-in-grid class to your element; give that element a size. */
+.smear-in-grid {
+  --accent: var(--fx-accent);
+  --ck-text: 14px;
+  --fx-accent: #4559ff;
+  --fx-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --fx-hair: rgba(23, 24, 26, 0.1);
+  --fx-ink: #17181a;
+  --fx-object: #fff;
+  --fx-shadow: 0 0 0 1px rgba(23, 24, 26, 0.06), 0 2px 8px rgba(23, 24, 26, 0.06);
+  --fx-wash: rgba(23, 24, 26, 0.06);
+  --font: var(--fx-font);
+  --hair: var(--fx-hair);
+  --ink: var(--fx-ink);
+  --object: var(--fx-object);
+  --r-md: 16px;
+  --r-pill: 999px;
+  --r-sm: 10px;
+  --shadow: var(--fx-shadow);
+}
+.smear-in-grid {
+  position: relative;
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--fx-wash);
+  isolation: isolate;
+  -webkit-user-select: none;
+  user-select: none;
+  font: 400 var(--ck-text)/20px var(--font);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+.smear-in-grid,
+.smear-in-grid *,
+.smear-in-grid *::before,
+.smear-in-grid *::after {
+  box-sizing: border-box;
+}
+.cr-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.smear-in-grid::before {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, rgba(23, 24, 26, 0.1) 1px, transparent 1.6px) center / 22px 22px;
+}
+.fx-board {
+  position: absolute;
+  inset: 0;
+}
+.dc-cursor {
+  --dc-ink: var(--ink, #17181a);
+  --dc-hair: var(--hair, rgba(23, 24, 26, 0.12));
+  --dc-spring: cubic-bezier(0.28, 1.3, 0.36, 1);
+  --dc-out: cubic-bezier(0.22, 1, 0.36, 1);
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 10;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+.dc-cursor svg {
+  position: absolute;
+  overflow: visible;
+  display: block;
+}
+.dc-body {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  transition: scale 380ms var(--dc-spring);
+}
+.dc-arrow {
+  filter: drop-shadow(0 0.5px 0.6px rgba(23, 24, 26, 0.3)) drop-shadow(0 2px 3px rgba(23, 24, 26, 0.14))
+    drop-shadow(0 7px 12px rgba(23, 24, 26, 0.1));
+  transition: filter 220ms var(--dc-out);
+}
+.dc-arrow path {
+  fill: var(--dc-ink);
+  stroke: #fff;
+  stroke-width: 1.6px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+.dc-cursor[data-down] .dc-body {
+  scale: 0.86;
+  transition: scale 90ms var(--dc-out);
+}
+.dc-cursor[data-down] .dc-arrow,
+.dc-cursor[data-hold] .dc-arrow {
+  filter: drop-shadow(0 0.4px 0.5px rgba(23, 24, 26, 0.32)) drop-shadow(0 1px 2px rgba(23, 24, 26, 0.14))
+    drop-shadow(0 3px 6px rgba(23, 24, 26, 0.06));
+}
+.dc-ripple {
+  position: absolute;
+  left: -20px;
+  top: -20px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1.5px solid var(--dc-ink);
+  background: rgba(23, 24, 26, 0.04);
+  opacity: 0;
+  pointer-events: none;
+  animation: dc-ripple 320ms var(--dc-out) forwards;
+}
+@keyframes dc-ripple {
+  from {
+    scale: 0.25;
+    opacity: 0.4;
+  }
+  to {
+    scale: 1;
+    opacity: 0;
+  }
+}
+.dc-cursor[data-hold] .dc-body {
+  scale: 0.8;
+  transition: scale 200ms var(--dc-out);
+}
+.dc-hold {
+  left: -20px;
+  top: -20px;
+  width: 40px;
+  height: 40px;
+  rotate: -90deg;
+  opacity: 0;
+  scale: 0.7;
+  transition:
+    opacity 180ms var(--dc-out),
+    scale 320ms var(--dc-spring);
+}
+.dc-cursor[data-hold] .dc-hold {
+  opacity: 1;
+  scale: 1;
+}
+.dc-hold circle {
+  fill: none;
+  stroke-width: 2px;
+}
+.dc-hold .dc-hold-bg {
+  fill: rgba(255, 255, 255, 0.55);
+  stroke: none;
+}
+.dc-hold .dc-hold-track {
+  stroke: var(--dc-hair);
+}
+.dc-hold .dc-hold-arc {
+  stroke: var(--dc-ink);
+  stroke-linecap: round;
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 1;
+}
+.dc-cursor[data-hold-done] .dc-hold {
+  animation: dc-hold-done 360ms var(--dc-spring);
+}
+@keyframes dc-hold-done {
+  50% {
+    scale: 1.1;
+  }
+}
+.dc-wheel {
+  left: 13px;
+  top: 17px;
+  width: 22px;
+  height: 32px;
+  opacity: 0;
+  scale: 0.5;
+  transform-origin: 0 0;
+  filter: drop-shadow(0 0.5px 0.6px rgba(23, 24, 26, 0.22)) drop-shadow(0 3px 6px rgba(23, 24, 26, 0.1));
+  transition:
+    opacity 180ms var(--dc-out),
+    scale 300ms var(--dc-spring);
+}
+.dc-cursor[data-wheel] .dc-wheel {
+  opacity: 1;
+  scale: 1;
+}
+.dc-wheel-shell {
+  fill: #fff;
+  stroke: var(--dc-ink);
+  stroke-width: 1.5px;
+}
+.dc-wheel-split {
+  stroke: var(--dc-hair);
+  stroke-width: 1px;
+}
+.dc-wheel-roll {
+  fill: var(--dc-ink);
+}
+.dc-cursor[data-wheel] .dc-wheel-roll {
+  animation: dc-roll 460ms cubic-bezier(0.45, 0, 0.25, 1) infinite;
+}
+.dc-cursor[data-wheel-up] .dc-wheel-roll {
+  animation-direction: reverse;
+}
+@keyframes dc-roll {
+  0% {
+    translate: 0 -2.5px;
+    opacity: 0.15;
+  }
+  35% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    translate: 0 4.5px;
+    opacity: 0.15;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dc-cursor {
+    display: none;
+  }
+}
+.sq-stage {
+  overflow: hidden;
+}
+.sq-grid {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(720px, 78%);
+  translate: -50% -50%;
+  display: grid;
+  grid-template-columns: repeat(var(--sq-cols, 4), minmax(0, 1fr));
+  gap: var(--sq-gap, 14px);
+}
+.sq-cell {
+  position: relative;
+  aspect-ratio: 4/3;
+}
+.sq-arrive {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 50%;
+}
+.sq-pic {
+  position: absolute;
+  inset: 0;
+}
+.sq-f {
+  position: absolute;
+  display: block;
+  margin: 0;
+  border: 0;
+}
+.sq-f.sq-disc {
+  aspect-ratio: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sq-arrive {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+}
+.ck-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--object);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font: 500 var(--ck-text)/1 var(--font);
+  white-space: nowrap;
+}
+.ck-pill[data-size="sm"] {
+  height: 32px;
+  padding: 0 12px;
+}
+.ck-solid {
+  background: var(--ink) !important;
+  color: var(--object) !important;
+  box-shadow: none;
+}
+.ck-media {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--object);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.ck-media[data-size="sm"] {
+  border-radius: var(--r-sm);
+}
+.ck-media[data-tone="1"] {
+  background: #e4e4e3;
+  box-shadow: none;
+}
+.ck-media[data-tone="2"] {
+  background: #d6d6d4;
+  box-shadow: none;
+}
+.ck-media[data-accent] {
+  color: var(--accent);
+}
+.ck-media[hidden] {
+  display: none;
+}
+.ck-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+.ck-dot[data-size="lg"] {
+  width: 24px;
+  height: 24px;
+}
+.ck-dot[data-accent] {
+  background: var(--accent);
+}
+.ck-dot[data-weak] {
+  background: rgba(23, 24, 26, 0.16);
+}
+@keyframes dc-ripple {
+  from {
+    scale: 0.25;
+    opacity: 0.4;
+  }
+  to {
+    scale: 1;
+    opacity: 0;
+  }
+}
+@keyframes dc-hold-done {
+  50% {
+    scale: 1.1;
+  }
+}
+@keyframes dc-roll {
+  0% {
+    translate: 0 -2.5px;
+    opacity: 0.15;
+  }
+  35% {
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    translate: 0 4.5px;
+    opacity: 0.15;
+  }
+}
+.ck-line {
+  display: block;
+  height: 1px;
+  border: 0;
+  background: var(--hair);
+}
+.ck-line[data-strong] {
+  height: 1.5px;
+  background: var(--ink);
+}
+.ck-line[data-v] {
+  width: 1px;
+  height: auto;
+}
+.ck-line[data-v][data-strong] {
+  width: 1.5px;
+}
+.smear-in-grid .ck-media {
+  border-radius: calc(var(--r-md) * var(--fx-k, 1));
+}
+.smear-in-grid .ck-media[data-size="sm"] {
+  border-radius: calc(var(--r-sm) * var(--fx-k, 1));
+}
+.smear-in-grid .ck-dot {
+  width: calc(8px * var(--fx-k, 1));
+  height: calc(8px * var(--fx-k, 1));
+}
+.smear-in-grid .ck-dot[data-size="lg"] {
+  width: calc(24px * var(--fx-k, 1));
+  height: calc(24px * var(--fx-k, 1));
+}
+.smear-in-grid :is(.ck-panel, .ck-pill, .ck-row) {
+  --fx-k: 1;
+}
+[data-sq-board] {
+  cursor: default;
+  touch-action: none;
+}
+[data-sq-board]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -8px;
+}
+[data-sq-board] .sq-grid {
+  left: var(--sq-x);
+  top: var(--sq-y);
+  width: var(--sq-w);
+  translate: none;
+}
+.sq-replay {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 3;
+  cursor: pointer;
+  border: 0;
+}
+.sq-replay:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+@media (max-width: 760px) {
+  .sq-replay {
+    right: 50%;
+    translate: 50% 0;
+  }
+}
