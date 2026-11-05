@@ -170,3 +170,7 @@ Full text: [LICENSE](LICENSE) or [effectatlas.com/license](https://effectatlas.c
 [hello@effectatlas.com](mailto:hello@effectatlas.com)
 
 Copyright (c) 2026 PROJECT Y/O
+
+## Friends
+
+- [LINUX DO](https://linux.do)
