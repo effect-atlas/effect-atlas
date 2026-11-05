@@ -173,4 +173,4 @@ Copyright (c) 2026 PROJECT Y/O
 
 ## Friends
 
-- [LINUX DO](https://linux.do)
+- [LINUX DO](https://linux.do): thanks to the community for helping me learn AI.
