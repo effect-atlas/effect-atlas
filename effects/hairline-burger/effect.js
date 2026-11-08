@@ -18,9 +18,6 @@
  *   From 400 ms after opening, hovering also tints the button background light grey.
  * - Size: the button is 72 px at scale 1 and scales up to 3x with the element (half of its width or height decides),
  *   never below 1. Line sizes, gap and shift scale with it.
- * - Demo, once on load (8 s): a fake cursor hovers the button (pinch), steps off and back, clicks to open at 3.65 s,
- *   steps off and back to show the spin, clicks to close at 5.65 s and leaves. Any real pointer move, press or keyboard
- *   focus on the button ends it for good.
  *
  * Options
  *   params.gap       6..16, default 11        px between the lines
@@ -34,9 +31,9 @@
  *   fx.params                      copy of current params
  *   fx.setParams({weight: 2})      change params live
  *   fx.setPaused(true|false)       freeze / resume (clicks are ignored while paused)
- *   fx.reset()                     params back to defaults, demo stopped, button closed
+ *   fx.reset()                     params back to defaults, button closed
  *   fx.setReducedMotion(bool)
- *   fx.destroy()                   removes listeners, observers and the fake cursor
+ *   fx.destroy()                   removes listeners, observers
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -69,29 +66,21 @@
  * Accessibility and reduced motion
  * - A real button with aria-expanded and a label that switches between "Open menu" and "Close menu". Keyboard focus
  *   (focus-visible) counts as hover. The Menu / Close text is aria-hidden; a visually hidden polite live region
- *   (.hl-live) announces "Menu opened." / "Menu closed." (the demo's own clicks are announced too).
- * - With reduced motion: no fake cursor, no spin, all transitions off; pinch, cross and label change instantly.
- * - The loop only runs for the demo and stops when the tab is hidden, the element is off screen or it is paused.
+ *   (.hl-live) announces "Menu opened." / "Menu closed.".
+ * - With reduced motion: no spin, all transitions off; pinch, cross and label change instantly.
+ *
  */
 (function (global) {
   'use strict';
 
   // ---- inlined from the shared runtime: math helpers ----
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-  const mix = (a, b, t) => a + (b - a) * t;
-  const smooth = (t) => {
-    t = clamp(t, 0, 1);
-    return t * t * (3 - 2 * t);
-  };
-  const R = { smooth, mix };
-
   // ---- inlined from the shared runtime: lifecycle ----
   // One requestAnimationFrame loop that runs only while something moves; pauses when the tab is hidden, the element is
   // off screen or setPaused(true); follows prefers-reduced-motion live; re-measures on resize; destroy() removes every
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -110,8 +99,29 @@
     const cleanup = [],
       hooks = new Map(),
       animations = new Set();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -126,7 +136,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -152,13 +170,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -166,6 +192,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       animations.forEach((animation) => {
         if (reduced()) animation.finish();
         else if (paused || !visible || document.hidden) animation.pause();
@@ -200,8 +230,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -220,6 +253,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -236,6 +324,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -263,6 +355,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -281,6 +377,8 @@
         return animation;
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -312,13 +410,24 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           animations: animations.size,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       animations.forEach((animation) => (document.hidden ? animation.pause() : !paused && animation.play()));
@@ -353,149 +462,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'gap', type: 'range', default: 11, min: 6, max: 16, step: 1 },
     { key: 'shift', type: 'range', default: 2, min: 0, max: 4, step: 0.5 },
@@ -510,35 +476,24 @@
     const api = scope(element, CONTROLS, options);
     element.classList.add('hl-stage');
     const cardOpt = options.card || null,
-      lab = (cardOpt && cardOpt.labels) || ['Menu', 'Close'];
-    if (cardOpt)
-      element.innerHTML =
-        '<div class="hl-wrap" data-card><div class="hl-bar"><button type="button" class="hl-btn ck-panel"' +
-        (cardOpt.interactive ? '' : ' tabindex="-1"') +
-        ' aria-label="Open menu" aria-expanded="false"><span class="hl-lines"><i></i><i></i></span></button></div>' +
-        '<span class="hl-state ck-hint" aria-hidden="true"><span class="hl-roll"><span>' +
-        lab[0] +
-        '</span><span>' +
-        lab[1] +
-        '</span></span></span></div><p class="cr-sr hl-live" aria-live="polite"></p>';
-    else
-      element.innerHTML =
-        '<div class="hl-wrap"><div class="hl-bar"><span class="hl-chip" aria-hidden="true">Contact</span><button type="button" class="hl-btn" aria-label="Open menu" aria-expanded="false"><span class="hl-lines"><i></i><i></i></span></button></div>' +
-        '<span class="hl-state" aria-hidden="true"><span class="hl-roll"><span>Menu</span><span>Close</span></span></span></div>' +
-        '<p class="cr-hint" data-cr-chrome>Hover to pinch · Click for a cross · Hover the cross to spin</p><p class="cr-sr hl-live" aria-live="polite"></p><div class="hl-hand" aria-hidden="true"></div>';
+      lab = cardOpt.labels || ['Menu', 'Close'];
+    element.innerHTML =
+      '<div class="hl-wrap" data-card><div class="hl-bar"><button type="button" class="hl-btn ck-panel"' +
+      '' +
+      ' aria-label="Open menu" aria-expanded="false"><span class="hl-lines"><i></i><i></i></span></button></div>' +
+      '<span class="hl-state ck-hint" aria-hidden="true"><span class="hl-roll"><span>' +
+      lab[0] +
+      '</span><span>' +
+      lab[1] +
+      '</span></span></span></div><p class="cr-sr hl-live" aria-live="polite"></p>';
     const btn = element.querySelector('.hl-btn'),
       lines = element.querySelector('.hl-lines'),
       bars = [...lines.children],
-      live = element.querySelector('.hl-live'),
-      hand = element.querySelector('.hl-hand');
+      live = element.querySelector('.hl-live');
     let open = false,
       hover = false,
-      openedAt = 0,
       spin = null,
-      bgTimer = 0,
-      previewCycle = -1,
-      fired = {},
-      handDown = false;
+      bgTimer = 0;
     function apply() {
       const p = api.params;
       element.style.setProperty('--gap', p.gap + 'px');
@@ -599,143 +554,27 @@
       if (open) setOpen(false);
       setHover(false);
       live.textContent = '';
-      previewCycle = -1;
       intro();
     });
-    const live2 = !!(cardOpt && cardOpt.interactive);
-    let handOff = false;
-    function takeOver(on) {
-      if (handOff) return;
-      handOff = true;
-      setHover(!!on);
-      if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-    }
-    if (live2) {
-      const real = (e) => e.pointerType !== 'touch' && btn.contains(e.target);
-      api.listen(
-        element,
-        'pointermove',
-        (e) => {
-          if (!handOff && !(e.pointerType === 'mouse' && !e.movementX && !e.movementY)) takeOver(real(e));
-        },
-        true,
-      );
-      api.listen(element, 'pointerdown', (e) => takeOver(real(e)), true);
+    {
       api.listen(btn, 'focus', () => {
-        if (btn.matches(':focus-visible')) takeOver(true);
+        if (btn.matches(':focus-visible')) {
+        }
       });
       api.listen(btn, 'click', () => {
         if (api.paused) return;
-        takeOver(btn.matches(':hover'));
         if (cardOpt.touched) cardOpt.touched();
       });
       api.restore = () => {
-        takeOver(false);
         if (open) setOpen(false);
         setHover(false);
         live.textContent = '';
       };
     }
-    const center = (el, fx = 0.5, fy = 0.5) => {
-      const s = element.getBoundingClientRect(),
-        r = el.getBoundingClientRect();
-      return { x: r.left - s.left + r.width * fx, y: r.top - s.top + r.height * fy };
-    };
-    function path(t) {
-      const s = element.getBoundingClientRect(),
-        rest = { x: s.width * 0.7, y: s.height * 0.8 },
-        b = center(btn, 0.62, 0.66),
-        near = { x: b.x + s.width * 0.09, y: b.y + s.height * 0.1 };
-      if (cardOpt && cardOpt.near) {
-        const r = btn.getBoundingClientRect();
-        near.x = b.x + r.width * cardOpt.near[0];
-        near.y = b.y + r.height * cardOpt.near[1];
-      }
-      const pts = [
-        [0, rest, 0],
-        [0.6, rest, 0],
-        [0.8, rest, 1],
-        [1.3, b, 1],
-        [2.3, b, 1],
-        [2.7, near, 1],
-        [3.0, near, 1],
-        [3.35, b, 1],
-        [4.2, b, 1],
-        [4.55, near, 1],
-        [4.8, near, 1],
-        [5.15, b, 1],
-        [6.1, b, 1],
-        [6.7, rest, 1],
-        [7.2, rest, 0],
-        [8, rest, 0],
-      ];
-      let a = pts[0],
-        z = pts[0];
-      for (let i = 0; i < pts.length - 1; i++) {
-        if (t >= pts[i][0] && t <= pts[i + 1][0]) {
-          a = pts[i];
-          z = pts[i + 1];
-          break;
-        }
-      }
-      const u = z[0] === a[0] ? 1 : R.smooth((t - a[0]) / (z[0] - a[0]));
-      return { x: R.mix(a[1].x, z[1].x, u), y: R.mix(a[1].y, z[1].y, u), o: R.mix(a[2], z[2], u) };
-    }
     api.frame(({ time, reduced }) => {
-      if (live2 && !handOff && cardOpt.once && time >= 8) takeOver(btn.matches(':hover'));
-      if (live2 && handOff) return false;
-      if (!options.preview || reduced) return false;
-      const c = Math.floor(time / 8),
-        t = time % 8;
-      if (c !== previewCycle) {
-        previewCycle = c;
-        fired = {};
-        if (open) setOpen(false);
-        setHover(false);
-        if (c > 0 && !cardOpt) intro();
-      }
-      const h = path(t);
-      if (!cardOpt) {
-        hand.style.opacity = h.o.toFixed(3);
-        hand.style.transform = 'translate3d(' + h.x.toFixed(1) + 'px,' + h.y.toFixed(1) + 'px,0)';
-      }
-      const over = (t >= 1.2 && t < 2.45) || (t >= 3.25 && t < 4.4) || (t >= 5.05 && t < 6.3);
-      setHover(over);
-      const down = (t >= 3.6 && t < 3.75) || (t >= 5.6 && t < 5.75);
-      if (cardOpt) {
-        if (cardOpt.pointer) cardOpt.pointer({ x: h.x, y: h.y, opacity: h.o, down });
-      } else if (down !== handDown) {
-        handDown = down;
-        hand.classList.toggle('is-down', down);
-      }
-      if (t >= 3.65 && !fired.o) {
-        fired.o = true;
-        setOpen(true);
-      }
-      if (t >= 5.65 && !fired.c) {
-        fired.c = true;
-        setOpen(false);
-      }
-      return true;
+      return false;
     });
-    const wrap = element.querySelector('.hl-wrap');
-    function fit() {
-      const w = element.clientWidth,
-        h = element.clientHeight;
-      if (!w || !h) return;
-      element.style.setProperty(
-        '--fit',
-        Math.max(1, Math.min((0.45 * w) / wrap.offsetWidth, (0.42 * h) / wrap.offsetHeight)).toFixed(3),
-      );
-    }
-    if (!cardOpt) {
-      const ro = new ResizeObserver(fit);
-      ro.observe(element);
-      api.cleanup(() => ro.disconnect());
-      fit();
-    }
     apply();
-    if (!cardOpt) intro();
     const status = api.status;
     api.status = () => ({
       ...status(),
@@ -761,39 +600,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -828,8 +634,7 @@
     element.classList.add('hairline-burger');
     element.innerHTML = '<div class="fx-board" data-hl></div>';
     const stage = element,
-      board = stage.querySelector('[data-hl]'),
-      cursor = createCursor(stage);
+      board = stage.querySelector('[data-hl]');
     const narrow = matchMedia('(max-width: 760px)');
     const fit = () => {
       const W = stage.clientWidth,
@@ -843,19 +648,15 @@
     observer0.observe(stage);
     const inst = mount(board, {
       params: options.params,
-      preview: true,
       card: {
         labels: ['Menu', 'Close'],
         interactive: true,
-        once: true,
         near: [0.42, 0.28],
-        pointer: cursor.set,
       },
     });
 
     inst.on('destroy', () => {
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

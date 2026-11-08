@@ -24,9 +24,6 @@
  *   drag: mouse and pen can press anywhere (the corner jumps to the projection of the pointer on the diagonal); touch
  *     must start on the dot so the page can still scroll. Pointer capture keeps tracking outside the frame.
  *   keys (the frame is focusable): Arrow keys +-0.1, PageUp / PageDown +-0.25, Home = 0.3, End = 1.
- * - Demo, once on load (times from mount): a fake cursor with a wheel badge fades in at 74% / 30% of the frame. The
- *   image starts open, closes to 0.3 from 1.0 to 2.6 s (smoothstep), stays closed, reopens from 3.6 to 5.4 s, then the
- *   cursor fades out (5.8 to 6.2 s) and the demo ends with the image open. The first wheel, press or key ends it.
  * - reset(): params back to defaults, the image eases back to fully open over 500 ms (cubic-bezier(.22, 1, .36, 1)).
  *
  * Options
@@ -39,8 +36,8 @@
  *   const fx = mountCrosshairImageReveal(element, {params: {...}});
  *   fx.params                      copy of current params
  *   fx.setParams({startScale: 1.5}) change params live
- *   fx.reset()                     defaults, demo stopped, eases back to fully open
- *   fx.destroy()                   stops the loop, removes listeners, observers and the fake cursor, empties the element
+ *   fx.reset()                     defaults, eases back to fully open
+ *   fx.destroy()                   stops the loop, removes listeners, observers, empties the element
  * There is no pause or reduced-motion setter; reduced motion follows the system setting live (see below).
  * The frame element carries data-progress and data-motion-state (closed / revealing / open / reduced) if you want to
  * hook other UI to it.
@@ -81,155 +78,12 @@
  *
  * Accessibility and reduced motion
  * - The frame is a focusable group with an aria-label naming the inputs; guides and dot are aria-hidden.
- * - With prefers-reduced-motion: no demo, no fake cursor; the image shows fully open, and wheel, drag and keys move the
+ * - With prefers-reduced-motion: the image shows fully open, and wheel, drag and keys move the
  *   crop instantly without easing.
  * - The loop only runs while something is moving.
  */
 (function (global) {
   'use strict';
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
 
   // ---- inlined from the shared card parts: a white card with a centred mark ----
   const GLYPHS = [
@@ -301,8 +155,7 @@
         step: 10,
         default: 120,
         unit: 'ms',
-        description:
-          'Easing time for the image and guides to catch up with input, demo included. 0 keeps input smoothing only.',
+        description: 'Easing time for the image and guides to catch up with input. 0 keeps input smoothing only.',
         visualizer: 'timeline',
       },
       {
@@ -338,17 +191,6 @@
       const r = 1 - clamp(u);
       return 1 - r * r * r;
     };
-    const smoothstep = (u) => u * u * (3 - 2 * u);
-    const DEMO = { cycle: 5600, rise: [400, 2200], fall: [3400, 5000] };
-    function demoAim(t, loop) {
-      const [r0, r1] = DEMO.rise,
-        [f0, f1] = DEMO.fall;
-      if (t < r0) return 0;
-      if (t < r1) return smoothstep((t - r0) / (r1 - r0));
-      if (!loop || t < f0) return 1;
-      if (t < f1) return 1 - smoothstep((t - f0) / (f1 - f0));
-      return 0;
-    }
     class Trail {
       constructor(p) {
         this.jump(p);
@@ -375,10 +217,8 @@
         return this.chase === aim && this.shown === aim;
       }
     }
-    const CARD_LEAD = 2400,
-      CARD_MIN = 0.3;
-    const RESTORE = 500,
-      ONCE_FADE = 8200;
+    const CARD_MIN = 0.3;
+    const RESTORE = 500;
     const ROUND_MIN = 0.35,
       WHEEL_GAP = 250;
     function cubicBezier(x1, y1, x2, y2) {
@@ -544,47 +384,14 @@
         if (this.mode === 'seek') {
           this.trail.jump(this.aim);
           p = this.aim;
-        } else if (this.mode === 'auto' || this.mode === 'follow') {
-          if (this.mode === 'auto') {
-            const t = this.loop ? this.clock % DEMO.cycle : this.clock;
-            this.aim = demoAim(t, this.loop);
-            if (this.card) this.aim = CARD_MIN + (1 - CARD_MIN) * this.aim;
-            if (this.loop) this.moveHand(t);
-          }
+        } else if (this.mode === 'follow') {
           p = this.trail.step(this.aim, dt, this.options.followDuration);
           const still = this.trail.settledOn(this.aim);
-          again = this.mode === 'auto' ? this.loop || this.clock < DEMO.rise[1] || !still : !still;
+          again = !still;
         }
         this.render(p);
         if (again) this.raf = requestAnimationFrame(this.tick);
         else this.mode = 'idle';
-      }
-      moveHand(t) {
-        if (this.card) {
-          const h = this.card.hand || {};
-          if (this.card.pointer)
-            this.card.pointer({
-              x: this.width * (h.x == null ? 0.5 : h.x),
-              y: this.height * (h.y == null ? 0.5 : h.y),
-              opacity: clamp((this.clock - CARD_LEAD) / 400),
-              down: false,
-              wheel: (t >= 300 && t < 2300) || (t >= 3300 && t < 5100),
-            });
-          return;
-        }
-        if (!this.hand) {
-          this.hand = document.createElement('span');
-          this.hand.className = 'cross-hand';
-          this.hand.setAttribute('aria-hidden', 'true');
-          this.element.appendChild(this.hand);
-        }
-        const seg = t >= 300 && t < 2300 ? (t - 300) / 2000 : t >= 3300 && t < 5100 ? (t - 3300) / 1800 : -1;
-        const up = t < 3000,
-          e = seg < 0 ? 0 : decelerate(seg / 0.85);
-        const y = up ? 0.72 - 0.34 * e : 0.38 + 0.34 * e;
-        this.hand.style.opacity = seg < 0 ? '0' : String(Math.min(1, seg / 0.1, (1 - seg) / 0.12));
-        this.hand.style.transform =
-          'translate3d(' + this.element.clientWidth * 0.82 + 'px,' + this.element.clientHeight * y + 'px,0)';
       }
       setProgress(progress, immediate = false) {
         if (this.destroyed) return;
@@ -607,24 +414,11 @@
       }
       scrollBy(delta) {
         if (this.destroyed) return;
-        if (this.mode === 'auto') this.setProgress(this.progress, true);
         this.setProgress(this.aim + delta);
       }
       fromViewport(top, height) {
         const travelled = ENTER_LINE * height - top;
         this.setProgress(travelled / ((height * this.options.revealSpan) / 100));
-      }
-      play(loop = false) {
-        if (this.destroyed) return;
-        this.stop();
-        this.loop = loop;
-        this.mode = 'auto';
-        this.clock = this.card ? CARD_LEAD : 0;
-        this.aim = this.card ? 1 : 0;
-        const first = this.reduced || this.card ? 1 : 0;
-        this.trail.jump(first);
-        this.render(first);
-        this.schedule();
       }
       stop() {
         cancelAnimationFrame(this.raf);
@@ -658,22 +452,14 @@
       attach() {
         const el = this.element,
           card = this.card,
-          report = card.pointer,
           motion = window.matchMedia('(prefers-reduced-motion: reduce)');
         this.live = true;
         this.direct = true;
-        this.handOff = false;
         this.back = null;
         this.drag = null;
-        this.report = report;
-        this.card = Object.assign({}, card, {
-          pointer: (s) => {
-            if (this.handOff || !report) return;
-            const f = card.once ? 1 - clamp((this.clock - ONCE_FADE) / 400) : 1;
-            report(Object.assign({}, s, { opacity: s.opacity * f }));
-          },
-        });
-        const base = () => (this.back || this.mode === 'auto' ? this.progress : this.aim);
+        this.report = void 0;
+        this.card = Object.assign({}, card, {});
+        const base = () => (this.back || false ? this.progress : this.aim);
         const go = (p) => {
           if (Math.abs(p - base()) < 1e-4) return;
           if (this.back) {
@@ -688,7 +474,6 @@
             this.trail.jump(p);
             this.render(p);
           } else {
-            if (this.mode === 'auto') this.setProgress(this.progress, true);
             this.setProgress(p);
           }
           if (card.touched) card.touched();
@@ -791,14 +576,9 @@
         };
       }
       take() {
-        if (this.handOff) return;
-        this.handOff = true;
-        this.loop = false;
-        if (this.report) this.report({ x: 0, y: 0, opacity: 0, down: false, wheel: false });
+        return;
       }
       liveTick(dt) {
-        if (this.mode === 'auto' && this.loop && !this.handOff && this.card.once && this.clock >= ONCE_FADE + 400)
-          this.take();
         if (!this.back) return false;
         this.back.t += dt;
         const u = clamp(this.back.t / RESTORE);
@@ -882,39 +662,6 @@
       owned: new Set(),
       done: false,
     };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
-    };
     const watched = (Base) =>
       Base &&
       class extends Base {
@@ -953,8 +700,7 @@
     const panelZone = () => ({ right: 0, bottom: 0 });
     const stage = element,
       board = stage.querySelector('.fx-board'),
-      box = board.querySelector('[data-crosshair]'),
-      cursor = createCursor(stage);
+      box = board.querySelector('[data-crosshair]');
     const narrow = matchMedia('(max-width:760px)'),
       motion = matchMedia('(prefers-reduced-motion: reduce)');
     let off = [0, 0];
@@ -982,18 +728,15 @@
       reduced: motion.matches,
       card: {
         media: () => media({ tone: 2, glyph: 0 }),
-        hand: { x: 0.74, y: 0.3 },
         interactive: true,
-        once: true,
         even: true,
         round: true,
         wheelLatch: true,
-        pointer: (s) => cursor.set(Object.assign({}, s, { x: s.x + off[0], y: s.y + off[1] })),
       },
     });
     const observer0 = new ResizeObserver(layout);
     observer0.observe(stage);
-    plate.play(true);
+    plate.setProgress(1, true);
     const inst = plate;
     motion.addEventListener('change', () => plate.setReduced(motion.matches), { signal: listeners.signal });
     const C = lib.CrosshairPlate.controls;
@@ -1021,7 +764,6 @@
         if (mounted.done) return;
         listeners.abort();
         observer0.disconnect();
-        cursor.destroy();
         if (inst) mounted.owned.add(inst);
         mounted.restore();
       },

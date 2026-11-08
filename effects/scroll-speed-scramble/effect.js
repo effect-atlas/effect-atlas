@@ -27,9 +27,6 @@
  * - Other input: drag anywhere on the board scrambles by drag speed; on touch, drag beyond the track end is passed to
  *   the page with window.scrollBy. Keys on the focused board: ArrowDown / ArrowUp feed 40 px, PageDown / PageUp feed
  *   0.875 x board height.
- * - Demo, once on load: a fake cursor appears, spins the wheel for 1 s at 0.65 s (sine speed curve peaking at
- *   2600 px/s), clicks to scatter at 2.35 s, clicks to gather at 4.5 s and fades at 5.3 s. The first wheel, press or
- *   key ends it for good.
  * - reset(): params back to defaults, letters settle at once and gather if scattered.
  *
  * Options
@@ -43,8 +40,8 @@
  *   const fx = mountScrollSpeedScramble(element, {params: {...}});
  *   fx.params                           copy of current params
  *   fx.setParams({scrambleDensity: 1})  change params live
- *   fx.reset()                          defaults, demo stopped, text settled and gathered
- *   fx.destroy()                        stops the demo and every timer, removes observers and the fake cursor, empties the element
+ *   fx.reset()                          defaults, text settled and gathered
+ *   fx.destroy()                        stops every timer, removes observers, empties the element
  * There is no pause or reduced-motion setter; reduced motion follows the system setting (see below).
  *
  * Usage (plain HTML)
@@ -80,154 +77,11 @@
  * Accessibility and reduced motion
  * - The board is a focusable group with an aria-label naming the inputs; the headline keeps the real text in its
  *   aria-label, so screen readers never read the noise.
- * - With prefers-reduced-motion: no demo and no fake cursor, and letter transitions are switched off (scatter and
+ * - With prefers-reduced-motion: and and letter transitions are switched off (scatter and
  *   gather jump). Scrambling on input still happens.
  */
 (function (global) {
   'use strict';
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
 
   const CONTROLS = [
     { key: 'scrambleDensity', type: 'range', min: 0.2, max: 1, step: 0.01, default: 0.67 },
@@ -309,7 +163,6 @@
       let letters = [];
       let token = 0;
       let timer = 0;
-      let previewTimer = 0;
       let scatterFrame = 0;
       let scatterPaintFrame = 0;
       let scattered = false;
@@ -358,7 +211,6 @@
           span.classList.remove('is-noise', 'is-lead', 'is-scattered');
           span.style.width = '';
         });
-        void title.offsetWidth;
         letters.forEach(clearLetterMotion);
         updateControlState();
       }
@@ -447,144 +299,19 @@
         if (action === 'scramble') scramble();
         if (action === 'scatter') scattered ? restoreScatter() : scatter();
       }
-      function preview() {
-        if (specimen.getMode() !== 'preview') return function () {};
-        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-          reset();
-          return function () {};
-        }
-        if (live) return livePreview();
-        if (cardOpt) return cardPreview();
-        const hand = document.createElement('span');
-        hand.setAttribute('aria-hidden', 'true');
-        hand.style.cssText =
-          'position:fixed;left:0;top:0;z-index:20;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:var(--ink,#17181a);box-shadow:0 0 0 4px rgba(255,255,255,.9),0 6px 16px rgba(23,24,26,.18);pointer-events:none;opacity:0;transition:transform .7s cubic-bezier(.16,1,.3,1),opacity .3s,scale .14s';
-        document.body.appendChild(hand);
-        const place = (fx, fy) => {
-          const r = title.getBoundingClientRect();
-          hand.style.transform = 'translate3d(' + (r.left + r.width * fx) + 'px,' + (r.top + r.height * fy) + 'px,0)';
-        };
-        const tap = (fn) => () => {
-          hand.style.scale = '.72';
-          window.setTimeout(() => {
-            hand.style.scale = '1';
-          }, 140);
-          fn();
-        };
-        const steps = [
-          [
-            0,
-            () => {
-              hand.style.transition = 'none';
-              place(0.9, 1.6);
-              hand.offsetWidth;
-              hand.style.transition = '';
-              hand.style.opacity = '1';
-              place(0.62, 0.78);
-            },
-          ],
-          [650, tap(scramble)],
-          [1700, () => place(0.34, 0.8)],
-          [2350, tap(scatter)],
-          [3900, () => place(0.5, 0.85)],
-          [4500, tap(restoreScatter)],
-          [
-            5300,
-            () => {
-              hand.style.opacity = '0';
-            },
-          ],
-        ];
-        const pending = [];
-        const cycle = () => {
-          if (specimen.isPaused()) return;
-          pending.splice(0).forEach(window.clearTimeout);
-          steps.forEach(([at, fn]) =>
-            pending.push(
-              window.setTimeout(() => {
-                if (!specimen.isPaused()) fn();
-              }, at),
-            ),
-          );
-        };
-        cycle();
-        previewTimer = window.setInterval(cycle, 6000);
-        return function () {
-          window.clearInterval(previewTimer);
-          pending.splice(0).forEach(window.clearTimeout);
-          window.clearTimeout(timer);
-          hand.remove();
-        };
-      }
-      function cardPreview() {
-        const hand = (state) => cardOpt.pointer(state);
-        const tap = (fn) => () => {
-          hand({ down: true });
-          window.setTimeout(() => {
-            hand({ down: false });
-          }, 140);
-          fn();
-        };
-        const steps = [
-          [
-            0,
-            () => {
-              hand({ fx: 0.9, fy: 1.6, jump: true });
-              hand({ opacity: 1, fx: 0.62, fy: 0.78 });
-            },
-          ],
-          [650, tap(scramble)],
-          [1700, () => hand({ fx: 0.34, fy: 0.8 })],
-          [2350, tap(scatter)],
-          [3900, () => hand({ fx: 0.5, fy: 0.85 })],
-          [4500, tap(restoreScatter)],
-          [
-            5300,
-            () => {
-              hand({ opacity: 0 });
-            },
-          ],
-        ];
-        const pending = [];
-        const cycle = () => {
-          if (specimen.isPaused()) return;
-          pending.splice(0).forEach(window.clearTimeout);
-          steps.forEach(([at, fn]) =>
-            pending.push(
-              window.setTimeout(() => {
-                if (!specimen.isPaused()) fn();
-              }, at),
-            ),
-          );
-        };
-        cycle();
-        previewTimer = window.setInterval(cycle, 6000);
-        return function () {
-          window.clearInterval(previewTimer);
-          pending.splice(0).forEach(window.clearTimeout);
-          window.clearTimeout(timer);
-          hand({ opacity: 0, down: false });
-        };
-      }
-      const live = !!(cardOpt && cardOpt.interactive);
-      const surface = live ? cardOpt.surface || title : null;
-      const hit = live ? cardOpt.hit || title : null;
+      const surface = cardOpt.surface || title;
+      const hit = cardOpt.hit || title;
       const SPEED_TAU = 120,
         SPEED_FULL = 2000,
-        TRAVEL = 1.5,
-        SPIN = 1000,
-        SPIN_PEAK = 2600;
+        TRAVEL = 1.5;
       let meter = 0,
         meterAt = 0,
         energy = 0,
         speedTimer = 0,
         speedStep = 0;
-      let handOff = false,
-        travel = 0,
-        drag = null,
-        spinTimer = 0;
-      const livePending = [],
-        liveOff = [];
+      let travel = 0,
+        drag = null;
+      const liveOff = [];
       function speedNow() {
         const now = performance.now();
         meter *= Math.exp(-(now - meterAt) / SPEED_TAU);
@@ -638,14 +365,6 @@
           span.style.width = '';
         });
       }
-      function take() {
-        if (handOff) return;
-        handOff = true;
-        livePending.splice(0).forEach(window.clearTimeout);
-        window.clearTimeout(spinTimer);
-        spinTimer = 0;
-        if (cardOpt.pointer) cardOpt.pointer({ opacity: 0, down: false, wheel: false });
-      }
       function release() {
         if (!drag) return;
         const id = drag.id;
@@ -669,71 +388,6 @@
         else scatter();
         if (cardOpt.touched) cardOpt.touched();
       }
-      function livePreview() {
-        const hand = (state) => cardOpt.pointer(state);
-        const tap = (fn) => () => {
-          hand({ down: true });
-          livePending.push(
-            window.setTimeout(() => {
-              hand({ down: false });
-            }, 140),
-          );
-          fn();
-        };
-        const spin = () => {
-          const t0 = performance.now();
-          let last = t0;
-          hand({ wheel: true });
-          (function step() {
-            const now = performance.now(),
-              u = Math.min(1, (now - t0) / SPIN);
-            feed((SPIN_PEAK * Math.sin(Math.PI * u) * (now - last)) / 1000);
-            last = now;
-            if (u < 1) spinTimer = window.setTimeout(step, 16);
-            else {
-              spinTimer = 0;
-              hand({ wheel: false });
-            }
-          })();
-        };
-        const steps = [
-          [
-            0,
-            () => {
-              hand({ fx: 0.9, fy: 1.6, jump: true });
-              hand({ opacity: 1, fx: 0.62, fy: 0.78 });
-            },
-          ],
-          [650, spin],
-          [1700, () => hand({ fx: 0.34, fy: 0.8 })],
-          [2350, tap(scatter)],
-          [3900, () => hand({ fx: 0.5, fy: 0.85 })],
-          [4500, tap(restoreScatter)],
-          [
-            5300,
-            () => {
-              hand({ opacity: 0 });
-            },
-          ],
-        ];
-        const cycle = () => {
-          if (handOff || specimen.isPaused()) return;
-          livePending.splice(0).forEach(window.clearTimeout);
-          steps.forEach(([at, fn]) =>
-            livePending.push(
-              window.setTimeout(() => {
-                if (!handOff && !specimen.isPaused()) fn();
-              }, at),
-            ),
-          );
-        };
-        cycle();
-        if (!cardOpt.once) previewTimer = window.setInterval(cycle, 6000);
-        return function () {
-          window.clearInterval(previewTimer);
-          take();
-        };
-      }
       function liveListen() {
         const WHEEL_GAP = 250,
           gap = cardOpt.wheelLatch ? (typeof cardOpt.wheelLatch === 'number' ? cardOpt.wheelLatch : WHEEL_GAP) : 0;
@@ -756,7 +410,6 @@
             const dy = event.deltaY * unit,
               dx = event.deltaX * unit;
             if (!dy && !dx) return;
-            take();
             feed(Math.hypot(dx, dy));
             if (gap && dy) {
               const now = performance.now();
@@ -784,7 +437,6 @@
         );
         on('pointerdown', (event) => {
           if (event.button !== 0) return;
-          take();
           release();
           drag = {
             id: event.pointerId,
@@ -827,7 +479,6 @@
           const k = event.key;
           if (k === 'Enter' || k === ' ') {
             event.preventDefault();
-            take();
             toggle();
             return;
           }
@@ -835,7 +486,6 @@
           const d =
             k === 'ArrowDown' ? 40 : k === 'ArrowUp' ? -40 : k === 'PageDown' ? page : k === 'PageUp' ? -page : 0;
           if (!d) return;
-          take();
           feed(d);
           if (!atEnd(d)) {
             event.preventDefault();
@@ -844,7 +494,6 @@
         });
       }
       function liveRestore() {
-        take();
         release();
         meter = 0;
         travel = 0;
@@ -859,16 +508,15 @@
       spans();
       updateControlState();
       if (controlsRoot) controlsRoot.addEventListener('click', onControl);
-      if (live) liveListen();
+      liveListen();
       return {
         controls,
         init() {
           return function () {
             if (controlsRoot) controlsRoot.removeEventListener('click', onControl);
             window.clearTimeout(timer);
-            window.clearInterval(previewTimer);
             cancelScatterFrames();
-            if (live) {
+            {
               release();
               liveOff.splice(0).forEach((off) => off());
             }
@@ -889,8 +537,7 @@
         },
         reset,
         replay: scramble,
-        ...(live ? { restore: liveRestore } : {}),
-        preview,
+        ...{ restore: liveRestore },
       };
     }
     lib.TextScramble = {
@@ -934,39 +581,6 @@
       owned: new Set(),
       done: false,
     };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
-    };
     const watched = (Base) =>
       Base &&
       class extends Base {
@@ -1006,49 +620,10 @@
       board = stage.querySelector('[data-tx-board]'),
       sheet = board.querySelector('.tx-sheet'),
       head = sheet.querySelector('.tx-head'),
-      cursor = createCursor(stage),
       narrow = matchMedia('(max-width:760px)');
-    const C = [
-      { key: 'scrambleDensity', min: 0.2, max: 1, step: 0.01, default: 0.67, unit: '' },
-      { key: 'scrambleDuration', min: 240, max: 1200, step: 24, default: 672, unit: 'ms' },
-      { key: 'scatterDistance', min: 4, max: 40, step: 1, default: 18, unit: 'px' },
-      { key: 'charset', type: 'select', default: 'latin' },
-    ];
-    const hand = { fx: 0.62, fy: 0.78, opacity: 0, down: false, wheel: false },
-      at = { x: 0, y: 0, o: 0 };
-    let raf = 0,
-      last = 0;
-    function toPx() {
-      const h = head.getBoundingClientRect(),
-        s = stage.getBoundingClientRect();
-      return { x: h.left - s.left + h.width * hand.fx, y: h.top - s.top + h.height * hand.fy };
-    }
-    function frame(now) {
-      raf = 0;
-      const dt = last ? Math.min(0.05, (now - last) / 1000) : 0;
-      last = now;
-      const p = toPx(),
-        k = 1 - Math.exp(-dt * 7);
-      at.x += (p.x - at.x) * k;
-      at.y += (p.y - at.y) * k;
-      at.o += Math.sign(hand.opacity - at.o) * Math.min(Math.abs(hand.opacity - at.o), dt / 0.3);
-      cursor.set({ x: at.x, y: at.y, opacity: at.o, down: hand.down, wheel: hand.wheel });
-      if (at.o > 0 || hand.opacity > 0) raf = requestAnimationFrame(frame);
-      else last = 0;
-    }
-    function pointer(s) {
-      Object.assign(hand, s);
-      if (s.jump) {
-        const p = toPx();
-        at.x = p.x;
-        at.y = p.y;
-        delete hand.jump;
-      }
-      if (!raf) raf = requestAnimationFrame(frame);
-    }
     const inst = lib.TextScramble.create(head, {
-      specimen: { isPaused: () => false, getMode: () => 'preview' },
-      card: { interactive: true, once: true, surface: board, hit: sheet, wheelLatch: true, endPush: true, pointer },
+      specimen: { isPaused: () => false, getMode: () => 'live' },
+      card: { interactive: true, surface: board, hit: sheet, wheelLatch: true, endPush: true },
     });
     let EM = null;
     function measure() {
@@ -1081,9 +656,7 @@
     layout();
     const observer0 = new ResizeObserver(layout);
     observer0.observe(stage);
-    const stopDemo = inst.preview();
     inst.destroy = () => {
-      stopDemo();
       inst.restore();
       inst.init()();
     };
@@ -1110,8 +683,6 @@
         if (mounted.done) return;
         listeners.abort();
         observer0.disconnect();
-        cancelAnimationFrame(raf);
-        cursor.destroy();
         if (inst) mounted.owned.add(inst);
         mounted.restore();
       },

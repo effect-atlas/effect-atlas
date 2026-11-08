@@ -27,8 +27,6 @@
  *   the following tick (300 ms at 10 fps). Coming back while it lifts climbs up again from where it is.
  * - Moving to another target restarts the draw-in there at once. If the target moves or resizes, the ellipse eases
  *   after it with factor 1 - exp(-lag x dt).
- * - Demo, once on load (8 s): a fake cursor visits the word, the image and the button in turn. The first real mouse
- *   move with actual movement, a press, or keyboard focus on a target ends it for good.
  *
  * Options
  *   params.fps     4..24, default 10      ticks per second for draw-in, boil and draw-out; lower = choppier, more hand-made
@@ -44,9 +42,9 @@
  *   fx.params                 copy of current params
  *   fx.setParams({loops: 3})  change params live (values are clamped to the ranges above)
  *   fx.setPaused(true|false)  freeze / resume; new hovers are ignored while paused
- *   fx.reset()                params back to defaults, demo ended, ring cleared
+ *   fx.reset()                params back to defaults, ring cleared
  *   fx.setReducedMotion(bool|null)
- *   fx.destroy()              removes listeners, observers, the SVG layer and the fake cursor
+ *   fx.destroy()              removes listeners, observers, the SVG layer
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -85,7 +83,7 @@
  *   activate it like a real button. A visually hidden polite live region (.sc-live) announces "Circled: <label>" when
  *   a ring is drawn and "<label> pressed." on keyboard activation.
  * - Touch: tap a target to circle it, tap it again or tap elsewhere to clear.
- * - With reduced motion: no demo cursor, no boil, no draw-in or draw-out; the full ring appears and disappears at once.
+ * - With reduced motion: no boil, no draw-in or draw-out; the full ring appears and disappears at once.
  *   Before the first real interaction the word target is shown circled.
  * - The loop sleeps when no ring is shown, and stops when the tab is hidden, the element is off screen or it is paused.
  */
@@ -94,30 +92,12 @@
 
   // ---- inlined from the shared runtime: math helpers ----
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-  const mix = (a, b, t) => a + (b - a) * t;
-  const smooth = (t) => {
-    t = clamp(t, 0, 1);
-    return t * t * (3 - 2 * t);
-  };
-  function mark(index, className) {
-    const names = ['ring', 'cross', 'square', 'x'];
-    const name = names[Math.abs(Number(index) || 0) % names.length];
-    const symbol = '';
-    const inner =
-      symbol.match(/<symbol[^>]*>([\s\S]*)<\/symbol>/)?.[1] ||
-      '<circle cx="50" cy="50" r="34" fill="none" stroke="currentColor" stroke-width="8"/>';
-    const css = String(className || '').replace(/[^a-z0-9 _-]/gi, '');
-    return '<svg class="' + css + '" viewBox="0 0 100 100" aria-hidden="true">' + inner + '</svg>';
-  }
-  const R = { mark, smooth, mix };
-
   // ---- inlined from the shared runtime: lifecycle ----
   // One requestAnimationFrame loop that runs only while something moves; pauses when the tab is hidden, the element is
   // off screen or setPaused(true); follows prefers-reduced-motion live; re-measures on resize; destroy() removes every
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -135,8 +115,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -151,7 +152,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -177,13 +186,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -191,6 +208,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -220,8 +241,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -240,6 +264,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -256,6 +335,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -280,6 +363,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -289,6 +376,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -318,12 +407,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -354,149 +454,6 @@
     width = Math.max(1, element.clientWidth);
     height = Math.max(1, element.clientHeight);
     return api;
-  }
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
   }
 
   // ---- inlined from the shared card parts: a white card with a centred mark (used when WebGL is unavailable) ----
@@ -782,43 +739,26 @@
     return { pen, advance, clear, resketch };
   }
   const PHASE_NAME = { idle: 'hidden', drawing: 'in', boiling: 'on', lifting: 'out' };
-  function demoMarkup(R) {
-    return (
-      '<div class="sc-scene"><p class="sc-line">Circle the <span class="sc-word" data-scribble>one idea</span><br>worth a second look.</p>' +
-      '<div class="sc-row"><div class="sc-media" data-scribble data-scribble-fit="1.3" role="img" aria-label="Placeholder image">' +
-      R.mark(0, 'sc-glyph') +
-      '</div>' +
-      '<a href="#" class="sc-pill" data-scribble>View project</a></div></div>' +
-      '<p class="cr-hint" data-cr-chrome>Hover a word, image, or button to circle it · On touch, tap to circle and tap again to clear</p><p class="cr-sr sc-live" aria-live="polite"></p><div class="sc-hand" aria-hidden="true"></div>'
-    );
-  }
   function mount(element, options) {
     options = options || {};
     const api = scope(element, CONTROLS, options);
     element.classList.add('sc-host');
     if (getComputedStyle(element).position === 'static') element.style.position = 'relative';
-    const card = options.card || null,
-      handsOn = !!(card && card.interactive);
-    element.innerHTML = card
-      ? card.markup || '<div class="sc-card"><a href="#" class="sc-pill" data-scribble>View project</a></div>'
-      : demoMarkup(R);
+    const card = options.card || null;
+    element.innerHTML =
+      card.markup || '<div class="sc-card"><a href="#" class="sc-pill" data-scribble>View project</a></div>';
     if (!element.querySelector('.sc-live'))
       element.insertAdjacentHTML('beforeend', '<p class="sc-live" aria-live="polite"></p>');
     const targets = [...element.querySelectorAll('[data-scribble]')],
-      dot = element.querySelector('.sc-hand'),
       live = element.querySelector('.sc-live');
     targets.forEach((t) => {
-      if (card && !handsOn) t.tabIndex = -1;
-      else if (!t.matches('a[href],button')) t.tabIndex = 0;
+      if (!t.matches('a[href],button')) t.tabIndex = 0;
     });
     const ink = makePen(element, api);
     let hovered = null,
       pinned = null,
-      demoWant = null,
-      handedOff = false,
-      lastPointer = '',
-      demoCycle = -1;
-    const wanted = () => hovered || pinned || (handsOn && handedOff ? null : demoWant);
+      lastPointer = '';
+    const wanted = () => hovered || pinned || null;
     const labelOf = (t) => (t.getAttribute('aria-label') || t.textContent || '').trim();
     function update() {
       const w = wanted();
@@ -881,104 +821,28 @@
       },
       true,
     );
-    function handOff() {
-      if (handedOff) return;
-      handedOff = true;
-      demoWant = null;
-      update();
-      if (card.pointer) card.pointer({ x: 0, y: 0, opacity: 0, down: false });
-    }
-    if (handsOn) {
-      api.listen(
-        element,
-        'pointermove',
-        (e) => {
-          if (!handedOff && !(e.pointerType === 'mouse' && !e.movementX && !e.movementY)) handOff();
-        },
-        true,
-      );
-      api.listen(element, 'pointerdown', () => handOff(), true);
+    {
       targets.forEach((t) =>
         api.listen(t, 'focus', () => {
-          if (t.matches(':focus-visible')) handOff();
+          if (t.matches(':focus-visible')) {
+          }
         }),
       );
       api.restore = () => {
-        handOff();
         pinned = null;
         hovered = null;
         update();
       };
     }
     api.on('replay', () => {
-      demoCycle = -1;
-      demoWant = null;
       pinned = null;
       hovered = null;
       update();
       ink.clear();
     });
     api.on('params', () => ink.resketch());
-    const L = card ? card.loop || 6 : 8;
-    function handAt(t) {
-      const sr = element.getBoundingClientRect(),
-        home = { x: sr.width * 0.84, y: sr.height * 0.86 },
-        stay = (L - 1.5) / targets.length - 0.5;
-      const keys = [
-        [0, home, 0],
-        [0.3, home, 0],
-        [0.6, home, 1],
-      ];
-      let at = 0.6;
-      targets.forEach((el) => {
-        const r = el.getBoundingClientRect(),
-          spot = { x: r.left - sr.left + r.width * 0.58, y: r.top - sr.top + r.height * 0.62 };
-        keys.push([at + 0.5, spot, 1], [at + 0.5 + stay, spot, 1]);
-        at += 0.5 + stay;
-      });
-      keys.push([at + 0.5, home, 1], [at + 0.9, home, 0], [L, home, 0]);
-      let a = keys[0],
-        b = keys[0];
-      for (let i = 0; i < keys.length - 1; i++) {
-        if (t >= keys[i][0] && t <= keys[i + 1][0]) {
-          a = keys[i];
-          b = keys[i + 1];
-          break;
-        }
-      }
-      const u = b[0] === a[0] ? 1 : R.smooth((t - a[0]) / (b[0] - a[0]));
-      return { x: R.mix(a[1].x, b[1].x, u), y: R.mix(a[1].y, b[1].y, u), o: R.mix(a[2], b[2], u) };
-    }
     api.frame(({ dt, time, reduced }) => {
       let more = false;
-      if (handsOn && !handedOff && card.once && time >= L) handOff();
-      if (options.preview && !reduced && !(handsOn && handedOff)) {
-        const c = Math.floor(time / L),
-          t = time % L;
-        if (c !== demoCycle) {
-          demoCycle = c;
-          demoWant = null;
-        }
-        const h = handAt(t),
-          sr = element.getBoundingClientRect();
-        let over = null;
-        if (h.o > 0.5)
-          targets.forEach((el) => {
-            const r = el.getBoundingClientRect(),
-              x = h.x + sr.left,
-              y = h.y + sr.top;
-            if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) over = el;
-          });
-        demoWant = over;
-        if (card) {
-          if (card.pointer) card.pointer({ x: h.x, y: h.y, opacity: h.o, down: false });
-        } else if (dot) {
-          dot.style.opacity = h.o.toFixed(3);
-          dot.style.transform = 'translate3d(' + h.x.toFixed(1) + 'px,' + h.y.toFixed(1) + 'px,0)';
-        }
-        more = true;
-      }
-      if (reduced && options.preview && !(handsOn && handedOff)) demoWant = targets[0] || null;
       ink.pen.want = wanted();
       return ink.advance(time * 1000, dt, reduced) || more;
     });
@@ -1005,39 +869,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1072,8 +903,7 @@
     element.classList.add('scribble-ring');
     element.innerHTML = '<div class="fx-board" data-sc></div>';
     const stage = element,
-      board = stage.querySelector('[data-sc]'),
-      cursor = createCursor(stage);
+      board = stage.querySelector('[data-sc]');
     const media = cardMedia({ tone: 1, glyph: 0, accent: true }).replace(
       'class="ck-media',
       'data-scribble data-scribble-fit="1.3" class="ck-media',
@@ -1095,15 +925,10 @@
     place();
     const observer0 = new ResizeObserver(place);
     observer0.observe(stage);
-    const inst = mount(board, {
-      params: options.params,
-      preview: true,
-      card: { markup, loop: 8, interactive: true, once: true, pointer: cursor.set },
-    });
+    const inst = mount(board, { params: options.params, card: { markup, loop: 8, interactive: true } });
 
     inst.on('destroy', () => {
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

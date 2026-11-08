@@ -46,8 +46,6 @@
  *   moves.
  * - Without WebGL, after a lost context, or with ?fallback in the page URL, the same matrices drive CSS 3D
  *   (perspective + matrix3d) on canvas-painted divs, with fog as opacity.
- * - Demo, once on load (6.4 s): a fake cursor wheels two discs forward (0.8 s and 1.9 s), moves to the next disc and
- *   clicks it (3.75 s), then fades. The first real wheel, press or key ends it for good.
  *
  * Options
  *   params.glide  300..900, default 510   ms for one wheel step; keys and clicks are derived from it
@@ -61,12 +59,11 @@
  *   fx.params                 copy of current params
  *   fx.setParams({gap: 120})  change params live
  *   fx.setPaused(true|false)  freeze / resume; input is ignored while paused
- *   fx.reset()                params back to defaults, demo stopped, the row slides back to the third disc (the start
+ *   fx.reset()                params back to defaults, the row slides back to the third disc (the start
  *                             position, nearest copy) over glide ms with no lean
- *   fx.goTo(n)                glide to disc n (0..8; the nearest copy on the ring, same glide as a key press); ends
- *                             the demo; returns false if paused or already there
+ *   fx.goTo(n)                glide to disc n (0..8; the nearest copy on the ring, same glide as a key press); returns false if paused or already there
  *   fx.setReducedMotion(bool)
- *   fx.destroy()              removes listeners, observers and the fake cursor; disposes geometries, textures,
+ *   fx.destroy()              removes listeners, observers; disposes geometries, textures,
  *                             materials, the environment target and the WebGL context
  *
  * Usage (plain HTML)
@@ -109,7 +106,7 @@
  *   last disc). It is a role="group" with aria-roledescription "carousel" and a label, and a polite live region
  *   announces "03 / 09". The canvas and CSS layers inside are aria-hidden; label the discs yourself if you put real
  *   content on them.
- * - With reduced motion: no demo, no tween, no lean, no trail; a change jumps straight to the target disc.
+ * - With reduced motion: no tween, no lean, no trail; a change jumps straight to the target disc.
  * - Only renders while something moves; the loop stops when the tab is hidden, the stage is off screen or it is paused.
  *
  * Third-party: three.js r128 (three.min.js, MIT License, Copyright 2010-2021 Three.js Authors; see three.LICENSE.txt).
@@ -128,7 +125,6 @@
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -146,8 +142,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -162,7 +179,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -188,13 +213,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -202,6 +235,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -231,8 +268,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -251,6 +291,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -267,6 +362,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -291,6 +390,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -300,6 +403,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -329,12 +434,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -367,149 +483,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'glide', type: 'range', default: 510, min: 300, max: 900, step: 10 },
     { key: 'gap', type: 'range', default: 100, min: 70, max: 130, step: 1 },
@@ -521,7 +494,6 @@
   const STRIP = { y: 0.27, h: 0.016, gain: 6 };
   const N = 9,
     START = 2,
-    HAND_LOOP = 6.4,
     wrap = (n) => ((n % N) + N) % N;
   const K = {
     radius: 2.4,
@@ -1062,24 +1034,19 @@
     options = options || {};
     const api = scope(element, CONTROLS, options);
     const cardOpt = options.card || null,
-      live = !!(cardOpt && cardOpt.interactive),
-      wantGL = (!cardOpt || !!cardOpt.webgl) && !!window.THREE;
+      wantGL = !!cardOpt.webgl && !!window.THREE;
+    const phased = !!cardOpt.startup;
     element.classList.add('dc-stage');
     element.innerHTML =
       '<div class="dc-viewport"' +
-      (cardOpt && !live
-        ? ' aria-hidden="true"'
-        : ' tabindex="0" role="group" aria-roledescription="carousel" aria-label="Disc carousel. Scroll, click a disc, or use the left and right arrow keys."') +
+      ' tabindex="0" role="group" aria-roledescription="carousel" aria-label="Disc carousel. Scroll, click a disc, or use the left and right arrow keys."' +
       '><canvas class="dc-webgl" aria-hidden="true"></canvas><div class="dc-css" aria-hidden="true"></div></div>' +
-      (cardOpt
-        ? ''
-        : '<p class="cr-hint" data-cr-chrome>Scroll to change · Click a disc to jump · ← →</p><div class="dc-hand" aria-hidden="true"></div>') +
+      '' +
       '<p class="cr-sr dc-live" aria-live="polite"></p>';
     const viewport = element.querySelector('.dc-viewport'),
       canvas = element.querySelector('.dc-webgl'),
       cssLayer = element.querySelector('.dc-css'),
-      liveEl = element.querySelector('.dc-live'),
-      handEl = element.querySelector('.dc-hand');
+      liveEl = element.querySelector('.dc-live');
     const css = getComputedStyle(element),
       tokv = (n, f) => css.getPropertyValue(n).trim() || f;
     const tok = {
@@ -1093,7 +1060,6 @@
       prevL = START,
       flow = 0,
       tween = null,
-      handOff = false,
       contextLost = false,
       first = true;
     const discs = Array.from({ length: N }, (_, i) => ({
@@ -1360,12 +1326,15 @@
       faceQ = [],
       faceBlobs = [];
     let faceT = 0,
+      fontT = 0,
       fontOk = false,
       fontWaited = false,
-      drewEarly = false;
+      drewEarly = false,
+      facesPrepared = false;
     api.cleanup &&
       api.cleanup(() => {
         clearTimeout(faceT);
+        clearTimeout(fontT);
         faceUrls.forEach((u) => u && URL.revokeObjectURL(u));
       });
     function setFace(i, u) {
@@ -1397,7 +1366,12 @@
               if (faceBlobs.filter(Boolean).length === N) faceStore[faceKey] = faceBlobs.slice();
             }
           };
-          done();
+          if (phased) {
+            const image = new Image();
+            image.onload = done;
+            image.onerror = () => URL.revokeObjectURL(u);
+            image.src = u;
+          } else done();
         }, 'image/png');
     }
     function faceSlice() {
@@ -1435,7 +1409,7 @@
         drewEarly = !fontOk;
         queueFaces();
       };
-      setTimeout(go, FONT_WAIT);
+      fontT = setTimeout(go, FONT_WAIT);
       fontReady.then(go);
     }
     let cssFacesDone = false;
@@ -1460,9 +1434,16 @@
         fontOk = true;
       },
     );
-    ensureCssFaces();
+    if (!phased) ensureCssFaces();
     fontReady.then(() => {
       if (api.destroyed) return;
+      if (phased && api.preparing) {
+        if (drewEarly) {
+          facesPrepared = false;
+          api.invalidatePreparation();
+        }
+        return;
+      }
       discGL.forEach((d, i) => {
         const c = d.map.image,
           g = c.getContext('2d');
@@ -1504,8 +1485,8 @@
       H = Math.max(1, viewport.clientHeight);
       const aspect = W / H;
       camZ = Math.max(K.camZ, 3.6 / (2 * Math.tan((K.fov / 2) * RAD) * aspect));
-      unit = cardOpt && !cardOpt.webgl ? +cardOpt.unit || 56 : H / (2 * Math.tan((K.fov / 2) * RAD) * camZ);
-      if (cardOpt && !cardOpt.webgl) camZ = K.camZ;
+      unit = !cardOpt.webgl ? +cardOpt.unit || 56 : H / (2 * Math.tan((K.fov / 2) * RAD) * camZ);
+      if (!cardOpt.webgl) camZ = K.camZ;
       if (renderer && !contextLost) {
         renderer.setSize(W, H, false);
         camera.aspect = aspect;
@@ -1529,18 +1510,6 @@
           M4.mul(M4.mul(M4.mul(M4.rx(d.rx), M4.ry(d.ry)), M4.rz(d.rz)), M4.sc(d.s, d.s, d.s)),
         ),
       );
-    function project(wx, wy, wz) {
-      const k = camZ / (camZ - wz);
-      return {
-        x: W / 2 + wx * unit * k + (viewport.offsetLeft || 0),
-        y: H / 2 - wy * unit * k + (viewport.offsetTop || 0),
-      };
-    }
-    function screenOf(v) {
-      const d = discs[wrap(v)],
-        w = worldOf(d);
-      return project(w[12], w[13], w[14]);
-    }
     function layout(dt, forced, params) {
       const cur = Math.round(L),
         moving = !forced && !api.reduced;
@@ -1791,72 +1760,7 @@
       handCycle = -1,
       handTarget = null,
       handHome = null;
-    function takeOver() {
-      if (handOff) return;
-      handOff = true;
-      if (cardOpt && cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false, wheel: false });
-      if (handEl) handEl.style.opacity = '0';
-    }
-    function pointer(s) {
-      if (cardOpt && cardOpt.pointer) cardOpt.pointer(s);
-      else if (handEl) {
-        handEl.style.opacity = s.opacity.toFixed(3);
-        handEl.style.transform = 'translate3d(' + s.x.toFixed(1) + 'px,' + s.y.toFixed(1) + 'px,0)';
-        handEl.classList.toggle('is-down', !!s.down);
-      }
-    }
-    function hand(dt) {
-      if (live && (handOff || (cardOpt.once && handT >= HAND_LOOP))) {
-        takeOver();
-        return false;
-      }
-      handT += dt;
-      const c = Math.floor(handT / HAND_LOOP),
-        t = handT % HAND_LOOP;
-      if (c !== handCycle || !handHome) {
-        if (c !== handCycle) {
-          handFired = {};
-          handTarget = null;
-        }
-        handCycle = c;
-        const s = screenOf(pendingIndex());
-        handHome = { x: s.x + 0.18 * unit, y: s.y + 0.34 * unit };
-      }
-      const ease = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
-      const home = handHome;
-      if (t >= 0.8 && !handFired.a) {
-        handFired.a = true;
-        wheelReset();
-        wheelInput(100, performance.now());
-      }
-      if (t >= 1.9 && !handFired.b) {
-        handFired.b = true;
-        wheelReset();
-        wheelInput(100, performance.now());
-      }
-      if (t >= 2.7 && !handTarget) {
-        handTarget = { v: pendingIndex() + 1 };
-        const s = screenOf(handTarget.v);
-        handTarget.x = s.x + 0.04 * unit;
-        handTarget.y = s.y + 0.16 * unit;
-      }
-      if (t >= 3.75 && !handFired.c) {
-        handFired.c = true;
-        goTo(handTarget.v, 'click');
-      }
-      let x = home.x,
-        y = home.y;
-      if (handTarget) {
-        const u = t < 3.7 ? ease((t - 2.7) / 1) : t < 4.4 ? 1 : 1 - ease((t - 4.4) / 0.9);
-        x = R.mix(home.x, handTarget.x, u);
-        y = R.mix(home.y, handTarget.y, u);
-      }
-      const opacity = t < 0.5 ? ease(t / 0.4) : t > 5.6 ? 1 - ease((t - 5.6) / 0.4) : 1;
-      pointer({ x, y, opacity, down: t >= 3.66 && t < 3.8, wheel: t >= 0.5 && t < 2.4 });
-      return true;
-    }
-    const userInput = !cardOpt || live;
-    if (userInput) {
+    {
       api.listen(
         viewport,
         'wheel',
@@ -1865,18 +1769,16 @@
           const t = norm(ev);
           if (!t) return;
           ev.preventDefault();
-          if (live) {
-            takeOver();
+          {
             back = false;
           }
-          if (wheelInput(t, performance.now()) && live && cardOpt.touched) cardOpt.touched();
+          if (wheelInput(t, performance.now()) && true && cardOpt.touched) cardOpt.touched();
         },
         { passive: false },
       );
       let press = null;
       api.listen(viewport, 'pointerdown', (ev) => {
         if (ev.button !== 0 || api.paused) return;
-        if (live) takeOver();
         press = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, at: performance.now() };
       });
       api.listen(viewport, 'pointerup', (ev) => {
@@ -1891,7 +1793,7 @@
           if (v !== null && v !== pendingIndex()) moved = goTo(v, 'click');
         } else if (ev.pointerType !== 'mouse' && Math.abs(dx) > 24 && Math.abs(dx) > Math.abs(dy))
           moved = goTo(pendingIndex() + (dx < 0 ? 1 : -1), 'key');
-        if (moved && live && cardOpt.touched) cardOpt.touched();
+        if (moved && true && cardOpt.touched) cardOpt.touched();
       });
       api.listen(viewport, 'pointercancel', () => {
         press = null;
@@ -1911,14 +1813,12 @@
         else if (ev.key === 'End') n = nearestOf(N - 1);
         if (n === null) return;
         ev.preventDefault();
-        if (live) takeOver();
-        if (goTo(n, 'key') && live && cardOpt.touched) cardOpt.touched();
+        if (goTo(n, 'key') && true && cardOpt.touched) cardOpt.touched();
       });
     }
     let back = false;
-    if (live) {
+    {
       api.restore = () => {
-        takeOver();
         wheelReset();
         const home = nearestOf(START);
         if (api.reduced) {
@@ -1963,7 +1863,6 @@
           tween = null;
         }
         flow = 0;
-        if (handEl) handEl.style.opacity = '0';
       }
     });
     function trackFlow(dt) {
@@ -1975,8 +1874,6 @@
     }
     api.frame(({ dt, params, reduced }) => {
       let handActive = false;
-      if (!reduced && (cardOpt ? !!cardOpt.pointer : !!options.preview)) handActive = hand(dt);
-      if (reduced && cardOpt && cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false, wheel: false });
       if (tween) {
         tween.t += dt;
         const u = reduced ? 1 : Math.min(1, tween.t / tween.dur);
@@ -1999,6 +1896,65 @@
       element.dataset.renderer = renderer && !contextLost ? 'webgl' : 'css';
       return handActive || !!tween || flow !== 0 || residual > 0.001;
     });
+    if (phased)
+      api.prepare(async (phase) => {
+        if (useCss() && !facesPrepared) {
+          cssFacesDone = true;
+          const kept = faceStore && faceStore[faceKey];
+          if (kept) {
+            const loads = await phase(
+              () =>
+                kept.map((blob, i) => {
+                  const url = URL.createObjectURL(blob);
+                  setFace(i, url);
+                  return new Promise((resolve, reject) => {
+                    const image = new Image();
+                    image.onload = resolve;
+                    image.onerror = () => reject(new Error('Disc face image failed'));
+                    image.src = url;
+                  });
+                }),
+              'disc-cached-faces',
+            );
+            await Promise.all(loads);
+          } else {
+            await Promise.race([
+              fontReady,
+              new Promise((resolve) => {
+                fontT = setTimeout(resolve, FONT_WAIT);
+              }),
+            ]);
+            clearTimeout(fontT);
+            fontT = 0;
+            fontWaited = true;
+            drewEarly = !fontOk;
+            const order = Array.from({ length: N }, (_, i) => i).sort(
+              (x, y) => Math.min(wrap(x - START), wrap(START - x)) - Math.min(wrap(y - START), wrap(START - y)),
+            );
+            const drawSlices = async () => {
+              let index = 0;
+              while (index < N)
+                await phase(() => {
+                  const started = performance.now();
+                  do {
+                    paintCssFace(order[index++]);
+                  } while (index < N && performance.now() - started <= 12);
+                }, 'disc-face-slice');
+            };
+            await drawSlices();
+            if (drewEarly && fontOk) {
+              drewEarly = false;
+              await drawSlices();
+            }
+          }
+          facesPrepared = true;
+        }
+        await phase(() => {
+          sizing();
+          handHome = null;
+          handTarget = null;
+        }, 'disc-layout');
+      });
     api.on('destroy', () => {
       res.forEach((r) => {
         try {
@@ -2024,7 +1980,6 @@
     });
     api.goTo = (n) => {
       if (api.paused) return false;
-      takeOver();
       return goTo(nearestOf(wrap(n)), 'key');
     };
     return api;
@@ -2042,39 +1997,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -2109,16 +2031,9 @@
     element.classList.add('disc-carousel');
     element.innerHTML = '<div class="fx-board" data-dc></div>';
     const stage = element,
-      board = stage.querySelector('[data-dc]'),
-      cursor = createCursor(stage);
-    const inst = mount(board, {
-      params: options.params,
-      card: { webgl: true, interactive: true, once: true, pointer: cursor.set },
-    });
+      board = stage.querySelector('[data-dc]');
+    const inst = mount(board, { params: options.params, card: { webgl: true, interactive: true } });
 
-    inst.on('destroy', () => {
-      cursor.destroy();
-    });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {
       get params() {

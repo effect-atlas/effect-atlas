@@ -20,12 +20,10 @@
  * - Menu button: two 1.5 px lines. Hover pulls them 1 px towards each other; open turns them into an X (+45 / -45 deg)
  *   in 0.5 s. Its label switches between "Open menu" and "Close menu".
  * - Until the first real click on the button, a soft accent ring breathes around it (two outlines growing 10 px and
- *   fading, 2.4 s, half a cycle apart). It hides while the demo cursor is near the button and goes away for good after
+ *   fading, 2.4 s, half a cycle apart). It hides while is near the button and goes away for good after
  *   the first click.
  * - Layout: the words sit bottom left, sized to fit the height (at least 40 px). The preview frame (4:5) sits right on
  *   wide screens and top left on narrow ones (760 px viewport or less).
- * - Demo, once, starting 3 s after load: a fake cursor clicks the button, runs down the first four words, steps aside,
- *   closes the menu at about 6 s and leaves. Any real pointer move, press or key ends it for good.
  *
  * Options
  *   params.panelDuration  500..1400, default 900    ms for the panel; each word takes .9 x this
@@ -39,9 +37,9 @@
  *   fx.params                          copy of current params
  *   fx.setParams({itemStagger: 90})    change params live
  *   fx.setPaused(true|false)           freeze / resume
- *   fx.reset()                         params back to defaults, demo stopped, menu closed (quickly if it was open)
+ *   fx.reset()                         params back to defaults, menu closed (quickly if it was open)
  *   fx.setReducedMotion(bool)
- *   fx.destroy()                       removes listeners, observers and the fake cursor
+ *   fx.destroy()                       removes listeners, observers
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -78,29 +76,21 @@
  * - The button has aria-expanded and a changing label. The menu is a labelled section, aria-hidden and out of the tab
  *   order while closed. Escape closes it and returns focus to the button. Focus on a word previews it like hover.
  * - On touch the first tap on a word previews it; a second tap on the same word follows it.
- * - With reduced motion: no fake cursor, no demo, all transitions off and no word animation, so the menu opens and
+ * - With reduced motion: all transitions off and no word animation, so the menu opens and
  *   closes instantly. The ring around the button stays still.
- * - The loop only runs for the demo and stops when the tab is hidden, the element is off screen or it is paused.
+ *
  */
 (function (global) {
   'use strict';
 
   // ---- inlined from the shared runtime: math helpers ----
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-  const mix = (a, b, t) => a + (b - a) * t;
-  const smooth = (t) => {
-    t = clamp(t, 0, 1);
-    return t * t * (3 - 2 * t);
-  };
-  const R = { smooth, mix, clamp };
-
   // ---- inlined from the shared runtime: lifecycle ----
   // One requestAnimationFrame loop that runs only while something moves; pauses when the tab is hidden, the element is
   // off screen or setPaused(true); follows prefers-reduced-motion live; re-measures on resize; destroy() removes every
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -119,8 +109,29 @@
     const cleanup = [],
       hooks = new Map(),
       animations = new Set();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -135,7 +146,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -161,13 +180,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -175,6 +202,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       animations.forEach((animation) => {
         if (reduced()) animation.finish();
         else if (paused || !visible || document.hidden) animation.pause();
@@ -209,8 +240,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -229,6 +263,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -245,6 +334,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -272,6 +365,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -290,6 +387,8 @@
         return animation;
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -321,13 +420,24 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           animations: animations.size,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       animations.forEach((animation) => (document.hidden ? animation.pause() : !paused && animation.play()));
@@ -360,149 +470,6 @@
     width = Math.max(1, element.clientWidth);
     height = Math.max(1, element.clientHeight);
     return api;
-  }
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
   }
 
   // ---- inlined from the shared card parts: a white card with a centred mark (used when WebGL is unavailable) ----
@@ -542,12 +509,9 @@
   ];
 
   // ---- the effect ----
-  const CARD_LEAD = 1.25,
-    CARD_RISE = 38;
-  const CARD_ONCE = 8.2;
+  const CARD_RISE = 38;
   const ITEMS = ['Work', 'Studio', 'Journal', 'Contact', 'Careers'];
-  const OUT = 'cubic-bezier(.22,1,.36,1)',
-    SPRING = 'cubic-bezier(.28,1.3,.36,1)';
+  const OUT = 'cubic-bezier(.22,1,.36,1)';
   const T = {
     rise: 64,
     itemLength: 0.9,
@@ -582,16 +546,12 @@
       [0, 1, 2, 3, 4].map((i) => '<rect x="14" y="' + (26 + i * 10) + '" width="52" height="3" fill="#fff"/>').join(''),
     '<rect width="80" height="100" fill="rgba(23,24,26,.08)"/><path d="M22 32 58 68M58 32 22 68" stroke="#17181a" stroke-width="3"/>',
   ];
-  const chars = (text) =>
-    [...text].map((c) => '<span class="ct-ch">' + (c === ' ' ? '&nbsp;' : c) + '</span>').join('');
   function mount(element, options) {
     options = options || {};
     const api = scope(element, CONTROLS, options);
     element.classList.add('ct-stage');
     const card = options.card || null;
-    const burger =
-      '<button type="button" class="ct-burger" aria-label="Open menu" aria-expanded="false"><span class="ct-lines"><i></i><i></i></span></button>';
-    if (card) {
+    {
       element.dataset.card = '';
       element.innerHTML =
         '<button type="button" class="ct-burger ck-pill" tabindex="-1" aria-label="Open menu" aria-expanded="false"><span class="ct-lines"><i class="ck-line" data-strong></i><i class="ck-line" data-strong></i></span></button>' +
@@ -613,73 +573,26 @@
             '</div>',
         ).join('') +
         '</div></section></div><p class="ct-live" aria-live="polite"></p>';
-    } else
-      element.innerHTML =
-        '<div class="ct-screen">' +
-        '<div class="ct-page"><header class="ct-head"><span class="ct-mark"><b>Studio</b></span><nav class="ct-mini" aria-hidden="true">' +
-        ITEMS.map((t) => '<span>' + t + '</span>').join('') +
-        '</nav><span class="ct-chip" aria-hidden="true">Contact</span></header>' +
-        '<div class="ct-body" aria-hidden="true"><p class="ct-lede">Quiet, exact rooms<br>for people who cook.</p><div class="ct-blocks"><i></i><i></i><i></i></div></div></div>' +
-        '<div class="ct-shade" aria-hidden="true"></div>' +
-        '<section class="ct-menu" aria-label="Main menu" aria-hidden="true"><nav class="ct-list">' +
-        ITEMS.map(
-          (t, i) => '<a href="#" class="ct-item" data-i="' + i + '" tabindex="-1"><span>' + t + '</span></a>',
-        ).join('') +
-        '</nav>' +
-        '<div class="ct-side"><div class="ct-frame" aria-hidden="true">' +
-        ART.map(
-          (a, i) =>
-            '<svg class="ct-art' +
-            (i === 0 ? ' is-on' : '') +
-            '" data-a="' +
-            i +
-            '" viewBox="0 0 80 100" preserveAspectRatio="xMidYMid slice">' +
-            a +
-            '</svg>',
-        ).join('') +
-        '</div>' +
-        '<div class="ct-foot"><div class="ct-sec"><p class="ct-t">' +
-        chars('Studio') +
-        '</p><p>' +
-        chars('12 Long Street') +
-        '</p><p>' +
-        chars('North Quarter') +
-        '</p></div><div class="ct-sec"><p class="ct-t">' +
-        chars('Enquiries') +
-        '</p><p>' +
-        chars('hello@studio.test') +
-        '</p></div></div></div>' +
-        '<span class="ct-word" aria-hidden="true">' +
-        [...'Studio'].map((c) => '<span class="ct-wl"><span>' + c + '</span></span>').join('') +
-        '</span><span class="ct-handle" aria-hidden="true">' +
-        chars('@studio') +
-        '</span></section>' +
-        burger +
-        '</div><p class="cr-hint" data-cr-chrome>Click the menu button · Hover items to preview · Esc to close</p><p class="cr-sr ct-live" aria-live="polite"></p><div class="ct-hand" aria-hidden="true"></div>';
+    }
     const $ = (s) => element.querySelector(s),
       screen = $('.ct-screen'),
       page = $('.ct-page'),
       menu = $('.ct-menu'),
       btn = $('.ct-burger'),
-      live = $('.ct-live'),
-      hand = $('.ct-hand');
+      live = $('.ct-live');
     const items = [...element.querySelectorAll('.ct-item')],
       arts = [...element.querySelectorAll('.ct-art')],
       secs = [...element.querySelectorAll('.ct-sec')],
       letters = [...element.querySelectorAll('.ct-wl>span')],
       handle = [...element.querySelectorAll('.ct-handle .ct-ch')];
-    if (card && card.big)
+    if (card.big)
       items.forEach((it) => {
         it.classList.remove('ck-row', 'ck-text');
         it.removeAttribute('data-strong');
       });
     let open = false,
       hover = -1,
-      running = [],
-      previewCycle = -1,
-      fired = {},
-      handDown = false,
-      previewOver = -2;
+      running = [];
     function apply() {
       const p = api.params;
       element.style.setProperty('--panel', p.panelDuration + 'ms');
@@ -727,7 +640,7 @@
           anim(
             it,
             [
-              { transform: 'translateY(' + (card ? (card.big ? pitchRise() : CARD_RISE) : T.rise) + 'px)' },
+              { transform: 'translateY(' + (card.big ? pitchRise() : CARD_RISE) + 'px)' },
               { transform: 'translateY(0)' },
             ],
             { duration: D * T.itemLength, delay: T.itemLead + i * S, easing: T.itemEase },
@@ -819,109 +732,23 @@
     api.on('params', apply);
     api.on('replay', () => {
       reset();
-      previewCycle = -1;
-      previewOver = -2;
     });
     api.on('motion', () => {
       stopRunning();
     });
-    const center = (el, fx = 0.5, fy = 0.5) => {
-      const s = element.getBoundingClientRect(),
-        r = el.getBoundingClientRect();
-      return { x: r.left - s.left + r.width * fx, y: r.top - s.top + r.height * fy };
-    };
-    function itemAt(i) {
-      if (card) {
-        const it = items[i];
-        let x = 0,
-          y = 0;
-        for (let n = it; n && n !== element; n = n.offsetParent) {
-          x += n.offsetLeft;
-          y += n.offsetTop;
-        }
-        return { x: x + Math.min(it.offsetWidth * 0.55, 140), y: y + it.offsetHeight * 0.55 };
-      }
-      const s = element.getBoundingClientRect(),
-        sc = screen.getBoundingClientRect(),
-        it = items[i];
-      return {
-        x: sc.left - s.left + it.offsetLeft + Math.min(it.offsetWidth * 0.55, 140),
-        y: sc.top - s.top + it.offsetTop + it.offsetHeight * 0.55,
-      };
-    }
-    function path(t) {
-      const s = element.getBoundingClientRect(),
-        rest = { x: s.width * 0.6, y: s.height * 0.86 },
-        b = center(btn, 0.55, 0.6),
-        gap =
-          card && card.big
-            ? { x: besideList(), y: itemAt(4).y }
-            : { x: itemAt(3).x + 60, y: itemAt(4).y + (card ? 0 : 60) };
-      const pts = [
-        [0, rest, 0],
-        [card ? 0.15 : 0.25, rest, 0],
-        [0.45, rest, 1],
-        [0.95, b, 1],
-        [1.25, b, 1],
-        [2.2, itemAt(0), 1],
-        [2.7, itemAt(0), 1],
-        [2.95, itemAt(1), 1],
-        [3.4, itemAt(1), 1],
-        [3.65, itemAt(2), 1],
-        [4.1, itemAt(2), 1],
-        [4.35, itemAt(3), 1],
-        [4.8, itemAt(3), 1],
-        [5.2, gap, 1],
-        [5.5, gap, 1],
-        [6.0, b, 1],
-        [6.35, b, 1],
-        [7.1, rest, 1],
-        [7.5, rest, 0],
-        [8, rest, 0],
-      ];
-      let a = pts[0],
-        z = pts[0];
-      for (let i = 0; i < pts.length - 1; i++) {
-        if (t >= pts[i][0] && t <= pts[i + 1][0]) {
-          a = pts[i];
-          z = pts[i + 1];
-          break;
-        }
-      }
-      const u = z[0] === a[0] ? 1 : R.smooth((t - a[0]) / (z[0] - a[0]));
-      return { x: R.mix(a[1].x, z[1].x, u), y: R.mix(a[1].y, z[1].y, u), o: R.mix(a[2], z[2], u) };
-    }
-    let handOff = false;
-    const live2 = card && card.interactive;
-    const intro = live2 && card.once && card.introDelay > 0 ? +card.introDelay : 0;
+    const intro = 0;
     function pitchRise() {
       return Math.round((T.rise * items[0].offsetHeight) / 61.4);
     }
-    function besideList() {
-      let x = 0;
-      for (let n = items[0].offsetParent; n && n !== element; n = n.offsetParent) x += n.offsetLeft;
-      return x + Math.max(...items.map((it) => it.offsetLeft + it.offsetWidth)) + 40;
-    }
-    function takeOver() {
-      if (handOff) return;
-      handOff = true;
-      if (card.pointer) card.pointer({ x: 0, y: 0, opacity: 0, down: false });
-      if (hover >= 0 && !items[hover].matches(':hover')) setHover(-1);
-    }
-    if (live2) {
+    {
       btn.tabIndex = 0;
       let lastType = 'mouse',
         tapHot = -1;
       const touched = () => {
         if (!api.paused && card.touched) card.touched();
       };
-      api.listen(element, 'pointermove', (e) => {
-        if (e.pointerType === 'mouse' && !e.movementX && !e.movementY) return;
-        takeOver();
-      });
       api.listen(element, 'pointerdown', (e) => {
         lastType = e.pointerType;
-        takeOver();
         tapHot = hover;
       });
       api.listen(
@@ -929,7 +756,6 @@
         'keydown',
         (e) => {
           if (e.key === 'Escape' && open) touched();
-          takeOver();
         },
         true,
       );
@@ -955,7 +781,6 @@
       api.listen(btn, 'click', touched);
       items.forEach((it) => api.listen(it, 'click', touched));
       api.restore = () => {
-        takeOver();
         stopRunning();
         if (intro) {
           if (open) {
@@ -976,82 +801,11 @@
       };
     }
     api.frame(({ time, reduced }) => {
-      if (live2 && handOff) return false;
-      if (card && reduced) {
-        if (!intro && !open) setOpen(true, false);
-        return false;
-      }
-      if (!options.preview || reduced) return false;
-      if (intro) {
-        if (time < intro) return true;
-        time -= intro;
-        if (time >= 8) {
-          takeOver();
-          return false;
-        }
-      } else if (live2 && card.once && time >= CARD_ONCE) {
-        takeOver();
-        return false;
-      }
-      const tt = intro ? time : card ? time + CARD_LEAD : time,
-        c = Math.floor(tt / 8),
-        t = tt % 8;
-      let snap = false;
-      if (c !== previewCycle) {
-        if (card && !intro && previewCycle < 0) {
-          snap = true;
-          element.dataset.reduced = 'true';
-        }
-        previewCycle = c;
-        fired = {};
-        reset();
-        previewOver = -2;
-      }
-      const h = path(t),
-        down = (t >= 1.0 && t < 1.15) || (t >= 6.05 && t < 6.2);
-      if (live2 && card.once && !intro) h.o *= R.clamp((CARD_ONCE - time) / 0.3, 0, 1);
-      if (card) {
-        if (card.pointer) card.pointer({ x: h.x, y: h.y, opacity: h.o * R.clamp(time / 0.4, 0, 1), down });
-      } else {
-        hand.style.opacity = h.o.toFixed(3);
-        hand.style.transform = 'translate3d(' + h.x.toFixed(1) + 'px,' + h.y.toFixed(1) + 'px,0)';
-        if (down !== handDown) {
-          handDown = down;
-          hand.classList.toggle('is-down', down);
-        }
-      }
-      if (t >= 1.05 && !fired.o) {
-        fired.o = true;
-        setOpen(true, false);
-      }
-      if (t >= 6.1 && !fired.c) {
-        fired.c = true;
-        setOpen(false, false);
-      }
-      if (open && t > 2.0 && t < 6) {
-        const sr = element.getBoundingClientRect();
-        let over = -1;
-        items.forEach((it, n) => {
-          const r = it.getBoundingClientRect(),
-            x = h.x + sr.left,
-            y = h.y + sr.top;
-          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) over = n;
-        });
-        if (over !== previewOver) {
-          previewOver = over;
-          setHover(over);
-        }
-      }
-      if (snap) {
-        running.forEach((a) => a.finish());
-        void element.offsetHeight;
-        element.dataset.reduced = String(api.reduced);
-      }
-      return true;
+      return false;
     });
     apply();
     const status = api.status;
-    api.status = () => ({ ...status(), open, hover, preview: arts.findIndex((a) => a.classList.contains('is-on')) });
+    api.status = () => ({ ...status(), open, hover });
     return api;
   }
 
@@ -1068,18 +822,6 @@
       owned: new Set(),
       done: false,
     };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
     const setTimeout = (cb, ms, ...args) => {
       const t = global.setTimeout(() => {
         mounted.timers.delete(t);
@@ -1087,19 +829,6 @@
       }, ms);
       mounted.timers.add(t);
       return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1135,8 +864,7 @@
     element.innerHTML = '<div class="fx-board" data-curtain></div>';
     const listeners = new AbortController();
     const stage = element,
-      board = stage.querySelector('[data-curtain]'),
-      cursor = createCursor(stage, { inertia: false });
+      board = stage.querySelector('[data-curtain]');
     const looks = [
       { tone: 1, glyph: false },
       { tone: 2, glyph: 0 },
@@ -1186,17 +914,11 @@
       btn = null;
     const inst = mount(board, {
       params: options.params,
-      preview: true,
       card: {
         big: true,
         interactive: true,
-        once: true,
         introDelay: 3,
         media: (i) => media(Object.assign({ size: 'sm' }, looks[i])),
-        pointer: (st) => {
-          cursor.set(st);
-          handNear(st);
-        },
       },
     });
     btn = board.querySelector('.ct-burger');
@@ -1232,14 +954,6 @@
         r.height +
         'px';
     }
-    function handNear(st) {
-      if (!ring) return;
-      const b = board.getBoundingClientRect(),
-        r = btn.getBoundingClientRect();
-      const dx = st.x - (r.left - b.left + r.width / 2),
-        dy = st.y - (r.top - b.top + r.height / 2);
-      ring.toggleAttribute('data-quiet', (+st.opacity || 0) > 0.05 && Math.hypot(dx, dy) < 140);
-    }
     placeRing();
     const observer0 = new ResizeObserver(() => {
       layout();
@@ -1250,7 +964,6 @@
     inst.on('destroy', () => {
       listeners.abort();
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

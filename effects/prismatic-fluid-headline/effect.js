@@ -29,9 +29,6 @@
  *   cyclic 256 px gradient built in code from STOPS (deep, saturated colours chosen for a light background; no yellow).
  *   Face = mix(paper -> ink at 0.015 d^2, gradient, max(z, w) * 1.9). Outline = mix(paper -> ink at 0.34 + 0.2 d^2,
  *   gradient, max(z, w) * 5.2 + max(0, 2d - 1) * 0.15), so an idle outline carries a faint moving band.
- * - Demo, once on load (6 s): a fake cursor sweeps the headline (2:3 Lissajous, twice, with a speed warp) and fades;
- *   it is pre-run 0.7 s so the first frame already has colour. The first real pointer move or press ends it.
- *   Touch: press and drag.
  * - The loop sleeps 2.4 s after the last movement (buffers cleared, one still frame).
  *
  * Options
@@ -47,8 +44,8 @@
  *   fx.params                          copy of current params
  *   fx.setParams({text: 'Hello'})      change params live (text and outline rebuild the mask)
  *   fx.setPaused(true|false)           freeze / resume
- *   fx.reset()                         params back to defaults, demo ended, colour cleared
- *   fx.destroy()                       removes listeners, observers, the fake cursor and releases the WebGL context
+ *   fx.reset()                         params back to defaults, colour cleared
+ *   fx.destroy()                       removes listeners, observers and releases the WebGL context
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -79,22 +76,19 @@
  * - No WebGL or no renderable half float: a canvas 2D version (ink outline, a fading colour stroke clipped to the
  *   letters; no advection or curl).
  * - The headline text is also in a visually hidden paragraph for screen readers; the canvas is aria-hidden.
- * - Reduced motion: no loop; the demo shows one still frame of colour; a real pointer paints nothing.
+ * - Reduced motion: no loop; a real pointer paints nothing.
  */
 (function (global) {
   'use strict';
 
   // ---- inlined from the shared runtime: math helpers ----
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-  const R = {};
-
   // ---- inlined from the shared runtime: lifecycle ----
   // One requestAnimationFrame loop that runs only while something moves; pauses when the tab is hidden, the element is
   // off screen or setPaused(true); follows prefers-reduced-motion live; re-measures on resize; destroy() removes every
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -112,8 +106,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -128,7 +143,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -154,13 +177,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -168,6 +199,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -197,8 +232,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -217,6 +255,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -233,6 +326,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -257,6 +354,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -266,6 +367,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -295,12 +398,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -333,149 +447,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'text', type: 'text', default: 'Make some waves' },
     { key: 'brush', type: 'range', default: 5, min: 2, max: 12, step: 0.5 },
@@ -485,29 +456,28 @@
   ];
 
   // ---- the effect ----
-  const LOOP = 6,
-    K = {
-      push: 30,
-      curlScale: 0.015,
-      curlMix: [1.2, 0.8],
-      drift: 0.04,
-      velDiss: 0.978,
-      w2Diss: 0.76,
-      accel: 0.84,
-      gain: 0.7,
-      floor: 0.0055,
-      range: 100,
-      quiet: 2.4,
-      faceK: 1.9,
-      edgeK: 5.2,
-      band: 0.15,
-      edgeInk: 0.34,
-      edgeInkBand: 0.2,
-      faceInk: 0.015,
-      weight: 800,
-      track: -0.035,
-      lineH: 0.9,
-    };
+  const K = {
+    push: 30,
+    curlScale: 0.015,
+    curlMix: [1.2, 0.8],
+    drift: 0.04,
+    velDiss: 0.978,
+    w2Diss: 0.76,
+    accel: 0.84,
+    gain: 0.7,
+    floor: 0.0055,
+    range: 100,
+    quiet: 2.4,
+    faceK: 1.9,
+    edgeK: 5.2,
+    band: 0.15,
+    edgeInk: 0.34,
+    edgeInkBand: 0.2,
+    faceInk: 0.015,
+    weight: 800,
+    track: -0.035,
+    lineH: 0.9,
+  };
   const STOPS = ['#2a2cff', '#7b2cff', '#d4148f', '#ff2d3c', '#ff7a00', '#00a98f', '#0a7cff'];
   const VERT = 'attribute vec2 aPos;varying vec2 vUv;void main(){vUv=aPos*.5+.5;gl_Position=vec4(aPos,0.,1.);}';
   const PAINT = `precision highp float;varying vec2 vUv;
@@ -569,21 +539,18 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
   function mount(element, options) {
     options = options || {};
     const api = scope(element, CONTROLS, options);
-    const cardOpt = options.card || null,
-      live = !!(cardOpt && cardOpt.interactive),
-      handed = !!(options.preview || cardOpt);
+    const cardOpt = options.card || null;
     element.classList.add('pf-stage');
     element.innerHTML =
       '<div class="pf-sheet' +
-      (cardOpt ? ' pf-fill' : '') +
+      ' pf-fill' +
       '"><canvas class="pf-gl" aria-hidden="true"></canvas><p class="pf-sr"></p></div>' +
-      (cardOpt
-        ? ''
-        : '<p class="cr-hint" data-cr-chrome>Move across the headline · On touch, press and drag</p><div class="pf-hand" aria-hidden="true"></div>');
+      '';
     const sheet = element.querySelector('.pf-sheet'),
-      canvas = element.querySelector('.pf-gl'),
-      sr = element.querySelector('.pf-sr'),
-      handEl = element.querySelector('.pf-hand');
+      sr = element.querySelector('.pf-sr');
+    let canvas = element.querySelector('.pf-gl'),
+      view = canvas;
+    const phased = !!cardOpt.startup;
     let W = 1,
       H = 1,
       dpr = 1,
@@ -697,8 +664,11 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       ctx = null,
       HF = 0,
       quad = null,
-      pend = null,
-      warmLater = false;
+      pend = null;
+    let programSpecs = [],
+      parallel = null,
+      rendererReady = false,
+      contextLost = false;
     function progsReady() {
       if (!pend) return true;
       if (!gl || !pend.qs.every((q) => gl.getProgramParameter(q.p, pend.done))) return false;
@@ -765,7 +735,7 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       if (!ok) throw new Error('no float target');
       return { t, f, w, h };
     }
-    try {
+    function acquireGL() {
       const attr = { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false };
       gl = canvas.getContext('webgl2', attr);
       if (gl) {
@@ -781,49 +751,134 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
         }
       }
       if (gl) {
-        const qs = [PAINT, BLUR, SHOW].map(progStart),
-          par = gl.getExtension('KHR_parallel_shader_compile');
-        if (par) {
-          pend = { qs, done: par.COMPLETION_STATUS_KHR };
-          canvas.style.visibility = 'hidden';
-        } else [P.paint, P.blur, P.show] = qs.map(progEnd);
-        quad = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-        T.mask = tex(gl.LINEAR);
-        T.grad = tex(gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, gradientPixels());
-        F.a = target(4, 4);
-        F.b = target(4, 4);
-        F.la = target(2, 2);
-        F.lb = target(2, 2);
-        gl.disable(gl.BLEND);
-        gl.disable(gl.DEPTH_TEST);
         lose = gl.getExtension('WEBGL_lose_context');
+        parallel = gl.getExtension('KHR_parallel_shader_compile');
+        const ownCanvas = canvas;
+        api.listen(ownCanvas, 'webglcontextlost', (event) => {
+          if (ownCanvas !== canvas || api.destroyed) return;
+          event.preventDefault();
+          contextLost = true;
+          api.invalidatePreparation();
+          if (!api.preparing) {
+            try {
+              fallback2D();
+              fit();
+              begin();
+              api.paint();
+              api.wake();
+            } catch (error) {
+              api.destroy();
+            }
+          }
+        });
       }
-    } catch (e) {
-      if (lose)
-        try {
-          lose.loseContext();
-        } catch (_) {}
+    }
+    function submitPrograms() {
+      if (contextLost) throw new Error('Prism WebGL context lost during preparation');
+      const qs = (programSpecs = [PAINT, BLUR, SHOW].map(progStart));
+      if (parallel) {
+        pend = { qs, done: parallel.COMPLETION_STATUS_KHR };
+        canvas.style.visibility = 'hidden';
+      } else if (!phased) [P.paint, P.blur, P.show] = qs.map(progEnd);
+    }
+    function bindRenderer() {
+      if (contextLost) throw new Error('Prism WebGL context lost during preparation');
+      quad = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      T.mask = tex(gl.LINEAR);
+      T.grad = tex(gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, gradientPixels());
+      F.a = target(4, 4);
+      F.b = target(4, 4);
+      F.la = target(2, 2);
+      F.lb = target(2, 2);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.DEPTH_TEST);
+      rendererReady = true;
+    }
+    function releaseGL() {
+      const old = gl;
       gl = null;
+      rendererReady = false;
+      if (old)
+        try {
+          Object.values(F).forEach((t) => {
+            if (t && t.t) old.deleteTexture(t.t);
+            if (t && t.f) old.deleteFramebuffer(t.f);
+          });
+          Object.values(T).forEach((t) => old.deleteTexture(t));
+          if (quad) old.deleteBuffer(quad);
+          programSpecs.forEach((q) => {
+            old.deleteShader(q.v);
+            old.deleteShader(q.f);
+            old.deleteProgram(q.p);
+          });
+          const disposal = lose || old.getExtension('WEBGL_lose_context');
+          if (disposal) disposal.loseContext();
+        } catch (_) {}
+      P = {};
+      T = {};
+      F = {};
+      quad = pend = parallel = lose = null;
+      programSpecs = [];
     }
-    if (!gl) {
-      const c2 = document.createElement('canvas');
-      c2.className = 'pf-gl';
-      c2.setAttribute('aria-hidden', 'true');
-      canvas.replaceWith(c2);
-      ctx = c2.getContext('2d');
+    function fallback2D() {
+      releaseGL();
+      const replacement = document.createElement('canvas');
+      replacement.className = 'pf-gl';
+      replacement.setAttribute('aria-hidden', 'true');
+      canvas.replaceWith(replacement);
+      canvas = view = replacement;
+      ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Prism renderer unavailable');
+      contextLost = false;
+      rendererReady = true;
     }
-    const view = gl ? canvas : ctx.canvas;
-    api.cleanup(() => {
+    if (!phased) {
       try {
-        if (lose) lose.loseContext();
-      } catch (e) {}
-    });
+        acquireGL();
+        if (gl) {
+          submitPrograms();
+          bindRenderer();
+        } else fallback2D();
+      } catch (error) {
+        fallback2D();
+      }
+    }
+    async function prepareRenderer(phase) {
+      if (rendererReady) return;
+      try {
+        await phase(acquireGL, 'prism-context');
+        if (!gl) {
+          await phase(fallback2D, 'prism-fallback');
+          return;
+        }
+        await phase(submitPrograms, 'prism-shader-submit');
+        if (parallel) {
+          let done = false;
+          while (!done)
+            done = await phase(() => {
+              if (contextLost) throw new Error('Prism WebGL context lost during preparation');
+              return programSpecs.every((q) => gl.getProgramParameter(q.p, parallel.COMPLETION_STATUS_KHR));
+            }, 'prism-shader-poll');
+        }
+        for (let i = 0; i < programSpecs.length; i++)
+          await phase(() => {
+            if (contextLost) throw new Error('Prism WebGL context lost during preparation');
+            P[['paint', 'blur', 'show'][i]] = progEnd(programSpecs[i]);
+          }, 'prism-shader-status-' + i);
+        pend = null;
+        await phase(bindRenderer, 'prism-bind-renderer');
+      } catch (error) {
+        if (api.destroyed || cardOpt.startup.signal.aborted || error.name === 'AbortError') throw error;
+        await phase(fallback2D, 'prism-fallback');
+      }
+    }
+    api.cleanup(releaseGL);
     let trail = null,
       tmp = null,
       GRAD = null;
@@ -838,7 +893,7 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       } else if (trail) trail.getContext('2d').clearRect(0, 0, trail.width, trail.height);
       S.vx = S.vy = 0;
     }
-    function fit() {
+    function fit(skipMask) {
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       W = Math.max(2, sheet.clientWidth);
       H = Math.max(2, sheet.clientHeight);
@@ -874,7 +929,7 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
         clearPaint();
         S.from = null;
       }
-      buildMask();
+      if (!skipMask) buildMask();
     }
     const S = {
       x: 0,
@@ -983,6 +1038,8 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       }
     }
     function render() {
+      if (!rendererReady || contextLost) throw new Error('Prism renderer is not ready');
+      view.style.visibility = '';
       if (gl) {
         const u = P.show.u;
         pass(P.show, null);
@@ -1030,62 +1087,10 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       ctx.drawImage(tmp, 0, 0);
       ctx.drawImage(tmp, 0, 0);
     }
-    function hand(t) {
-      const tm = ((t % LOOP) + LOOP) % LOOP,
-        u = ((tm + (LOOP / (2 * Math.PI)) * 0.32 * Math.sin((2 * Math.PI * tm) / LOOP)) / LOOP) * 2 * Math.PI * 2;
-      const o =
-        cardOpt && cardOpt.once
-          ? Math.min(1, Math.max(0, t / 0.35), Math.max(0, (LOOP - t) / 0.4))
-          : Math.min(1, Math.max(0, t / 0.3));
-      return { x: box.cx + box.hw * 0.86 * Math.sin(2 * u + 0.3), y: box.cy + box.hh * 0.85 * Math.sin(3 * u), o };
-    }
-    let handOff = false;
-    const handOn = () => handed && !handOff;
-    function showHand(h) {
-      const x = sheet.offsetLeft + h.x * sheet.offsetWidth,
-        y = sheet.offsetTop + h.y * sheet.offsetHeight;
-      if (cardOpt) {
-        if (cardOpt.pointer) cardOpt.pointer({ x, y, opacity: h.o, down: false });
-      } else if (handEl) {
-        handEl.style.opacity = h.o.toFixed(3);
-        handEl.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
-      }
-    }
-    function aim(h) {
-      const on = !(cardOpt && cardOpt.once) || h.o > 0.5;
-      if (!on) {
-        S.has = false;
-        S.seen = false;
-        return;
-      }
-      S.x = h.x * W;
-      S.y = h.y * H;
-      S.has = true;
-    }
-    function warm() {
-      S.t = -0.7;
-      for (let i = 0; i < 42; i++) {
-        aim(hand(S.t + 1 / 60));
-        simStep(1 / 60);
-      }
-      S.t = 0;
-    }
     function begin() {
       clearPaint();
       Object.assign(S, { has: false, seen: false, from: null, t: 0, quiet: 99 });
-      if (handed && !live) {
-        if (progsReady()) warm();
-        else warmLater = true;
-      }
     }
-    function takeOver() {
-      if (handOff) return;
-      handOff = true;
-      S.has = false;
-      S.seen = false;
-      showHand({ x: 0.5, y: 0.5, o: 0 });
-    }
-    const realOK = () => !handed || handOff;
     function feed(e) {
       const r = sheet.getBoundingClientRect(),
         x = e.clientX - r.left,
@@ -1104,17 +1109,10 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       S.quiet = 0;
       api.wake();
     }
-    const quiet = (e) => e.pointerType === 'mouse' && !e.movementX && !e.movementY;
     api.listen(element, 'pointermove', (e) => {
-      if (live && !handOff) {
-        if (quiet(e)) return;
-        takeOver();
-      }
-      if (realOK()) feed(e);
+      feed(e);
     });
     api.listen(element, 'pointerdown', (e) => {
-      if (live && !handOff) takeOver();
-      if (!realOK()) return;
       if (e.pointerType !== 'mouse') {
         S.touch = true;
         S.seen = false;
@@ -1137,14 +1135,12 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       S.has = false;
       S.seen = false;
     });
-    if (live)
-      api.restore = () => {
-        takeOver();
-        S.touch = false;
-        clearPaint();
-        S.quiet = 99;
-        api.paint();
-      };
+    api.restore = () => {
+      S.touch = false;
+      clearPaint();
+      S.quiet = 99;
+      api.paint();
+    };
     let lastText = null,
       lastOutline = null;
     api.on('params', (p) => {
@@ -1155,58 +1151,65 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       }
     });
     api.on('replay', () => {
-      handOff = false;
       begin();
     });
     api.on('resize', () => {
       fit();
     });
-    if (document.fonts && document.fonts.load)
-      document.fonts.load(K.weight + ' 100px ' + family()).then(
-        () => {
-          if (!api.destroyed) {
-            buildMask();
-            api.paint();
-          }
-        },
-        () => {},
-      );
+    const fontReady =
+      document.fonts && document.fonts.load
+        ? document.fonts.load(K.weight + ' 100px ' + family()).catch(() => {})
+        : Promise.resolve();
+    if (!phased)
+      fontReady.then(() => {
+        if (!api.destroyed) {
+          buildMask();
+          api.paint();
+        }
+      });
     api.frame(({ dt, reduced }) => {
       if (gl && !progsReady()) return true;
-      if (warmLater) {
-        warmLater = false;
-        warm();
-      }
       if (reduced) {
-        showHand({ x: 0.5, y: 0.5, o: 0 });
         render();
         return false;
       }
-      if (live && handOn() && cardOpt.once && S.t + dt >= LOOP) takeOver();
-      if (handOn()) {
-        const h = hand(S.t + dt);
-        aim(h);
-        showHand(h);
-        S.quiet = 0;
-      }
       simStep(Math.min(dt, 1 / 30));
       render();
-      if (!handOn() && S.quiet > K.quiet) {
+      if (S.quiet > K.quiet) {
         clearPaint();
         render();
         return false;
       }
       return true;
     });
-    fit();
-    lastText = api.params.text;
-    lastOutline = api.params.outline;
-    begin();
-    api.paint();
+    if (phased)
+      api.prepare(async (phase) => {
+        await prepareRenderer(phase);
+        await fontReady;
+        await phase(() => {
+          if (contextLost) fallback2D();
+          fit(true);
+        }, 'prism-targets');
+        await phase(() => {
+          buildMask();
+          lastText = api.params.text;
+          lastOutline = api.params.outline;
+        }, 'prism-mask');
+        await phase(() => {
+          clearPaint();
+          Object.assign(S, { has: false, seen: false, from: null, t: 0, quiet: 99 });
+        }, 'prism-reset');
+      });
+    else {
+      fit();
+      lastText = api.params.text;
+      lastOutline = api.params.outline;
+      begin();
+      api.paint();
+    }
     const status = api.status;
     api.status = () =>
       Object.assign(status(), {
-        handOff,
         quiet: +S.quiet.toFixed(2),
         renderer: gl ? (gl.texStorage2D ? 'webgl2' : 'webgl') : 'canvas2d',
       });
@@ -1225,39 +1228,6 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1291,16 +1261,14 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
     };
     element.classList.add('prismatic-fluid-headline');
     element.innerHTML = '<div class="fx-board"><div class="pf-box" data-pf></div></div>';
-    const panelZone = () => ({ right: 0, bottom: 0 });
     const stage = element,
-      box = stage.querySelector('[data-pf]'),
-      cursor = createCursor(stage, { inertia: false });
+      box = stage.querySelector('[data-pf]');
     let inst = null;
     function place() {
       const W = stage.clientWidth,
         H = stage.clientHeight,
         m = W < 600 ? 20 : 40,
-        x0 = false ? panelZone(stage).right + 40 : m;
+        x0 = m;
       box.style.left = x0 + 'px';
       box.style.top = m + 'px';
       box.style.width = W - m - x0 + 'px';
@@ -1308,21 +1276,12 @@ void main(){vec2 m=texture2D(uMask,vUv).rg;vec4 p=texture2D(uPaint,vUv);float k=
     }
 
     place();
-    inst = mount(box, {
-      params: options.params,
-      preview: true,
-      card: {
-        interactive: true,
-        once: true,
-        pointer: (s) => cursor.set(Object.assign({}, s, { x: s.x + box.offsetLeft, y: s.y + box.offsetTop })),
-      },
-    });
+    inst = mount(box, { params: options.params, card: { interactive: true } });
     const observer0 = new ResizeObserver(place);
     observer0.observe(stage);
 
     inst.on('destroy', () => {
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

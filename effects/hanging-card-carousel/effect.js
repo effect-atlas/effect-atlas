@@ -28,8 +28,6 @@
  * - Size: the rail sits 174 px from the top (centred vertically under 760 px). Card height = 0.575 x lane height x
  *   cardScale / 100 (at least 60 px), width = 0.72 x height, gap = max(10 px, 0.14 x width). The card at the offset is
  *   centred; the rail starts on the second card and can travel seven cards.
- * - Demo, once on load (8 s): a fake cursor drags the rail left with an accelerating stroke and lets go (glide and
- *   swing), then at 4.2 s drags it back right. The first real press ends it for good.
  *
  * Options
  *   params.resistance  2..10, default 4.5    glide decay; higher stops sooner and shorter
@@ -42,10 +40,10 @@
  *   fx.params                  copy of current params
  *   fx.setParams({swing: 14})  change params live
  *   fx.setPaused(true|false)   freeze / resume; pausing releases a running drag
- *   fx.reset()                 params back to defaults, demo stopped, the rail eases back to the second card over 0.5 s
+ *   fx.reset()                 params back to defaults, the rail eases back to the second card over 0.5 s
  *                              (cubic-bezier(0.22, 1, 0.36, 1)) while the swing fades out
  *   fx.setReducedMotion(bool)
- *   fx.destroy()               removes listeners, observers and the fake cursor
+ *   fx.destroy()               removes listeners, observers
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -82,10 +80,10 @@
  * - The track is a focusable role="group" (tabindex 0, labelled "Hanging card track with eight items..."; the stage
  *   shows an accent ring on keyboard focus only); cards are articles with their labels. ArrowLeft / ArrowRight glide
  *   one card (with the same glide and swing as a throw), Home / End go to the first / last card, so all eight are
- *   reachable from the keyboard; a key also ends the demo.
- * - With reduced motion: no swing, no glide, no spring, no rubber band, no demo. Dragging still moves the rail inside
+ *   reachable from the keyboard.
+ * - With reduced motion: no swing, no glide, no spring, no rubber band, . Dragging still moves the rail inside
  *   its bounds and release snaps straight to the nearest card.
- * - The rAF loop runs only while something moves: once the demo is over, the rail has stopped and every card has
+ * - The rAF loop runs only while something moves: when the rail has stopped and every card has
  *   swung back to rest, it stops; the next press, key or reset wakes it. It also stops when the tab is hidden, the
  *   stage is off screen or it is paused.
  */
@@ -120,7 +118,6 @@
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -138,8 +135,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -154,7 +172,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -180,13 +206,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -194,6 +228,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -223,8 +261,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -243,6 +284,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -259,6 +355,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -283,6 +383,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -292,6 +396,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -321,12 +427,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -357,149 +474,6 @@
     width = Math.max(1, element.clientWidth);
     height = Math.max(1, element.clientHeight);
     return api;
-  }
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
   }
 
   // ---- inlined from the shared card parts: a white card with a centred mark (used when WebGL is unavailable) ----
@@ -544,60 +518,34 @@
     const api = scope(element, CONTROLS, options);
     element.classList.add('services-stage');
     const cardOpt = options.card || null;
-    const live = !!(cardOpt && cardOpt.interactive);
-    let handOff = false,
-      back = null,
+    let back = null,
       prior = null;
-    if (cardOpt)
-      element.innerHTML =
-        '<div class="services-scroller"' +
-        (live ? ' tabindex="0"' : '') +
-        ' role="group" aria-label="Hanging card track' +
-        (live ? ' with eight items. Drag or use the left and right arrow keys, Home and End.' : '') +
-        '"><div class="services-rail" aria-hidden="true">' +
-        (cardOpt.rail ? cardOpt.rail() : '') +
-        '</div><div class="services-track">' +
-        services
-          .map(
-            (s, i) =>
-              '<article class="hanging-card" aria-label="' +
-              s +
-              '"><div class="service-connector" aria-hidden="true">' +
-              (cardOpt.hanger ? cardOpt.hanger(i) : '') +
-              '</div><div class="service-card-body">' +
-              (cardOpt.item ? cardOpt.item(i) : '') +
-              '</div></article>',
-          )
-          .join('') +
-        '</div></div>';
-    else
-      element.innerHTML =
-        '<div class="services-scroller" tabindex="0" role="group" aria-label="Hanging card track with eight items. Drag or use the left and right arrow keys."><div class="services-rail" aria-hidden="true"></div><div class="services-track">' +
-        services
-          .map(
-            (s, i) =>
-              '<article class="hanging-card" aria-label="' +
-              s +
-              '"><div class="service-connector" aria-hidden="true"><svg viewBox="0 0 50 74"><path d="M25 8V60" stroke="currentColor" stroke-width="2.5"/><circle class="service-pin" cx="25" cy="8" r="5"/><circle cx="25" cy="64" r="5" fill="#fff" stroke="currentColor" stroke-width="2.5"/></svg></div><div class="service-card-body"><div class="service-card-top"><span>' +
-              String(i + 1).padStart(2, '0') +
-              '</span><i aria-hidden="true"></i></div>' +
-              R.mark(i, 'service-symbol') +
-              '<h2>' +
-              s +
-              '</h2>' +
-              R.bars() +
-              '</div></article>',
-          )
-          .join('') +
-        '</div><div class="services-hand" aria-hidden="true"></div></div><div class="services-bottom" data-cr-chrome><span class="services-count" aria-live="polite">01 / 08</span><span>Drag · Release to glide and swing back</span><div class="cr-arrows"><button type="button" class="cr-arrow services-prev" aria-label="Previous">←</button><button type="button" class="cr-arrow services-next" aria-label="Next">→</button></div></div>';
+    element.innerHTML =
+      '<div class="services-scroller"' +
+      ' tabindex="0"' +
+      ' role="group" aria-label="Hanging card track' +
+      ' with eight items. Drag or use the left and right arrow keys, Home and End.' +
+      '"><div class="services-rail" aria-hidden="true">' +
+      (cardOpt.rail ? cardOpt.rail() : '') +
+      '</div><div class="services-track">' +
+      services
+        .map(
+          (s, i) =>
+            '<article class="hanging-card" aria-label="' +
+            s +
+            '"><div class="service-connector" aria-hidden="true">' +
+            (cardOpt.hanger ? cardOpt.hanger(i) : '') +
+            '</div><div class="service-card-body">' +
+            (cardOpt.item ? cardOpt.item(i) : '') +
+            '</div></article>',
+        )
+        .join('') +
+      '</div></div>';
     const scroller = element.querySelector('.services-scroller'),
       cards = [...element.querySelectorAll('.hanging-card')],
       bodies = cards.map((c) => c.querySelector('.service-card-body')),
       connectors = cards.map((c) => c.querySelector('.service-connector')),
-      counter = element.querySelector('.services-count'),
-      hand = element.querySelector('.services-hand'),
-      prev = element.querySelector('.services-prev'),
-      next = element.querySelector('.services-next');
+      counter = element.querySelector('.services-count');
     let fresh = true,
       width = 1,
       height = 1,
@@ -615,13 +563,12 @@
       spring = null,
       drag = null,
       lastIndex = -1,
-      lastCurrent = -1,
-      introDone = false;
+      lastCurrent = -1;
     let pendulums = services.map((_, i) => ({ angle: 0, speed: 0, omega: 8.2 + ((i * 37) % 7) * 0.18 }));
     const rubber = (over, dim) => dim * 0.55 * (1 - 1 / (over / (dim * 0.55) + 1));
     function layout() {
-      if (live) prior = { step, offset };
-      if (cardOpt) {
+      prior = { step, offset };
+      {
         width = scroller.clientWidth;
         height = scroller.clientHeight;
         cardH = (Math.max(60, height * 0.575) * api.params.cardScale) / 100;
@@ -641,26 +588,6 @@
           restart();
         }
         return;
-      }
-      width = scroller.clientWidth;
-      height = scroller.clientHeight;
-      cardH =
-        (Math.max(100, Math.min(height - (api.height < 500 ? 40 : 64), height * 0.84, api.width < 620 ? 400 : 440)) *
-          api.params.cardScale) /
-        100;
-      cardW = cardH * 0.72;
-      gap = Math.max(18, cardW * 0.12);
-      step = cardW + gap;
-      max = Math.max(0, step * 8 - gap + width * 0.14 - width);
-      if (!drag && !glide && !spring) offset = R.clamp(offset, 0, max);
-      cards.forEach((c) => {
-        c.style.width = cardW + 'px';
-        c.style.height = cardH + 'px';
-      });
-      element.style.setProperty('--service-size', cardW + 'px');
-      if (fresh && width > 1) {
-        fresh = false;
-        restart();
       }
     }
     api.on('resize', layout);
@@ -702,10 +629,6 @@
     function jump(direction) {
       goTo(snap(offset) + direction * step);
     }
-    if (!cardOpt) {
-      api.listen(prev, 'click', () => jump(-1));
-      api.listen(next, 'click', () => jump(1));
-    }
     api.listen(scroller, 'keydown', (event) => {
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         event.preventDefault();
@@ -720,7 +643,7 @@
       glide = spring = null;
       velocity = 0;
       scroller.classList.add('is-dragging');
-      if (cardOpt && cardOpt.lift) cardOpt.lift(true);
+      if (cardOpt.lift) cardOpt.lift(true);
     }
     function moveTo(x, now) {
       const dt = Math.max(0.008, (now - drag.at) / 1000),
@@ -740,20 +663,13 @@
       const v = performance.now() - drag.at > 90 ? 0 : R.clamp(drag.v, -4200, 4200);
       drag = null;
       scroller.classList.remove('is-dragging');
-      if (cardOpt && cardOpt.lift) cardOpt.lift(false);
+      if (cardOpt.lift) cardOpt.lift(false);
       if (api.reduced) {
         offset = snap(offset);
         return;
       }
       fling(v);
     }
-    api.listen(scroller, 'pointerdown', (event) => {
-      if (event.button !== 0 || api.paused || options.preview) return;
-      scroller.setPointerCapture(event.pointerId);
-      press(event.clientX);
-      drag.id = event.pointerId;
-      api.wake();
-    });
     api.listen(scroller, 'pointermove', (event) => {
       if (!drag || event.pointerId !== drag.id || api.paused) return;
       moveTo(event.clientX, performance.now());
@@ -779,18 +695,14 @@
     function restart() {
       drag = null;
       scroller.classList.remove('is-dragging');
-      if (cardOpt && cardOpt.lift) cardOpt.lift(false);
+      if (cardOpt.lift) cardOpt.lift(false);
       velocity = smoothV = 0;
       glide = spring = null;
       lastIndex = lastCurrent = -1;
       pendulums.forEach((p) => {
         p.angle = p.speed = 0;
       });
-      introDone = !!options.preview || api.reduced;
-      offset = cardOpt ? R.clamp(step, 0, max) : introDone ? 0 : -width * 0.95;
-      if (!introDone) {
-        glide = { from: offset, to: 0, k: 4.2, t: 0, v0: width * 0.95 * 4.2 };
-      }
+      offset = R.clamp(step, 0, max);
     }
     api.on('replay', restart);
     api.on('motion', (reduced) => {
@@ -804,36 +716,6 @@
       }
     });
     api.on('destroy', () => release());
-    const handPath = (t) => {
-      t %= 8;
-      const L = step * 2.2,
-        y = height * 0.55,
-        ax = cardOpt ? left + step + cardW * 0.25 : width * 0.66,
-        bx = cardOpt ? left - step + cardW * 0.75 : width * 0.3;
-      if (t < 0.5) return { x: ax, y, down: false, o: R.smooth(t / 0.5) };
-      if (t < 0.7) return { x: ax, y, down: true, o: 1 };
-      if (t < 1.25) {
-        const k = Math.pow((t - 0.7) / 0.55, 1.7);
-        return { x: ax - k * L * 0.72, y: y + k * 6, down: true, o: 1 };
-      }
-      if (t < 1.9) {
-        const k = (t - 1.25) / 0.65;
-        return { x: ax - L * 0.72 - k * 30, y: y + 6, down: false, o: 1 - R.smooth(k) };
-      }
-      if (t < 4.2) return { x: bx, y, down: false, o: 0 };
-      if (t < 4.6) return { x: bx, y, down: false, o: R.smooth((t - 4.2) / 0.4) };
-      if (t < 4.8) return { x: bx, y, down: true, o: 1 };
-      if (t < 5.35) {
-        const k = Math.pow((t - 4.8) / 0.55, 1.7);
-        return { x: bx + k * L * 0.72, y: y - k * 6, down: true, o: 1 };
-      }
-      if (t < 6) {
-        const k = (t - 5.35) / 0.65;
-        return { x: bx + L * 0.72 + k * 30, y: y - 6, down: false, o: 1 - R.smooth(k) };
-      }
-      return { x: ax, y, down: false, o: 0 };
-    };
-    let handDown = false;
     function cubicBezier(x1, y1, x2, y2) {
       const at = (a, b, s) => {
           const r = 1 - s;
@@ -870,18 +752,6 @@
     }
     const RESTORE = 0.5,
       outEase = cubicBezier(0.22, 1, 0.36, 1);
-    function takeOver() {
-      if (handOff) return;
-      handOff = true;
-      if (handDown) {
-        handDown = false;
-        if (drag && drag.id == null) {
-          drag.v = 0;
-          letGo();
-        }
-      }
-      if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-    }
     function stepBack(dt, reduced) {
       back.t += dt;
       const u = reduced ? 1 : Math.min(1, back.t / RESTORE),
@@ -895,10 +765,9 @@
       });
       if (u >= 1) back = null;
     }
-    if (live) {
+    {
       api.listen(scroller, 'pointerdown', (event) => {
-        if (event.button !== 0 || api.paused || !options.preview) return;
-        takeOver();
+        if (event.button !== 0 || api.paused) return;
         back = null;
         scroller.setPointerCapture(event.pointerId);
         press(event.clientX);
@@ -913,7 +782,6 @@
         'keydown',
         (event) => {
           if (api.paused || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-          takeOver();
           back = null;
           if (cardOpt.touched) cardOpt.touched();
         },
@@ -943,7 +811,6 @@
         back = null;
       });
       api.restore = () => {
-        takeOver();
         if (drag) {
           if (drag.id != null && scroller.hasPointerCapture(drag.id)) scroller.releasePointerCapture(drag.id);
           drag = null;
@@ -968,27 +835,6 @@
     }
     api.frame(({ dt, time, params, reduced }) => {
       if (back) stepBack(dt, reduced);
-      if (live && !handOff && cardOpt.once && time >= 8) takeOver();
-      if (options.preview && !reduced && !(live && handOff)) {
-        const h = handPath(time);
-        if (cardOpt) {
-          if (cardOpt.pointer) cardOpt.pointer({ x: h.x, y: h.y, opacity: h.o, down: h.down });
-        } else {
-          hand.style.opacity = h.o.toFixed(3);
-          hand.style.transform = 'translate3d(' + h.x + 'px,' + h.y + 'px,0) scale(' + (h.down ? 0.82 : 1) + ')';
-          hand.classList.toggle('is-down', h.down);
-        }
-        if (h.down && !handDown) {
-          press(h.x);
-          handDown = true;
-        } else if (h.down && drag) {
-          moveTo(h.x, drag.at + dt * 1000);
-        } else if (!h.down && handDown) {
-          if (drag) drag.at = performance.now();
-          letGo();
-          handDown = false;
-        }
-      }
       const before = offset;
       if (!drag && !reduced && dt > 0) {
         if (glide) {
@@ -1000,7 +846,6 @@
             offset = glide.to;
             velocity = 0;
             glide = null;
-            introDone = true;
           }
         } else if (spring) {
           const k = 170,
@@ -1019,12 +864,12 @@
         prevV = smoothV;
       smoothV = dt > 0 ? R.mix(smoothV, v, 1 - Math.exp(-30 * dt)) : smoothV;
       const accel = dt > 0 ? R.clamp((smoothV - prevV) / dt, -30000, 30000) * unit : 0;
-      const gain = ((0.19 * params.swing) / 9) * (cardOpt && !cardOpt.fullSwing ? 0.5 : 1),
-        limit = params.swing * (cardOpt && !cardOpt.fullSwing ? 0.8 : 2.2);
+      const gain = ((0.19 * params.swing) / 9) * (!cardOpt.fullSwing ? 0.5 : 1),
+        limit = params.swing * (!cardOpt.fullSwing ? 0.8 : 2.2);
       let moving = false;
       cards.forEach((card, i) => {
         const p = pendulums[i],
-          x = (cardOpt ? left : width * 0.07) + i * step - offset;
+          x = left + i * step - offset;
         if (!reduced && dt > 0) {
           const w = p.omega,
             z = 0.085;
@@ -1050,21 +895,11 @@
       if (index !== lastCurrent) {
         cards.forEach((c, i) => c.classList.toggle('is-current', i === index));
         lastCurrent = index;
-        if (cardOpt && cardOpt.current) cardOpt.current(index);
-      }
-      if (!cardOpt) {
-        prev.disabled = offset <= 0.5 && !glide && !spring;
-        next.disabled = offset >= max - 0.5 && !glide && !spring;
+        if (cardOpt.current) cardOpt.current(index);
       }
       element.dataset.offset = offset.toFixed(3);
-      element.dataset.phase = drag
-        ? 'dragging'
-        : !introDone
-          ? 'entering'
-          : moving || glide || spring
-            ? 'settling'
-            : 'resting';
-      return (options.preview && !(live && handOff)) || !!drag || !!glide || !!spring || moving;
+      element.dataset.phase = drag ? 'dragging' : moving || glide || spring ? 'settling' : 'resting';
+      return !!drag || !!glide || !!spring || moving;
     });
     const status = api.status;
     api.status = () => ({
@@ -1078,7 +913,7 @@
       dragging: !!drag,
       angles: pendulums.map((p) => p.angle),
       visibleCards: cards.map((_, i) => {
-        const x = (cardOpt ? left : width * 0.07) + i * step - offset;
+        const x = left + i * step - offset;
         return x + cardW > 0 && x < width;
       }),
     });
@@ -1097,39 +932,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1165,8 +967,7 @@
     element.innerHTML = '<div class="fx-board"><div class="ck-lane" data-physics></div></div>';
     const stage = element,
       board = stage.querySelector('.fx-board'),
-      lane = board.querySelector('[data-physics]'),
-      cursor = createCursor(stage, { inertia: false });
+      lane = board.querySelector('[data-physics]');
     const PANEL_B = 158,
       GAP = 16,
       below = matchMedia('(max-width:760px)');
@@ -1198,10 +999,8 @@
     observer0.observe(stage);
     const inst = mount(lane, {
       params: options.params,
-      preview: true,
       card: {
         interactive: true,
-        once: true,
         fullSwing: true,
         rail: () => '<i class="ck-line"></i>',
         hanger: () => '<i class="ck-line" data-v data-strong></i><span class="ck-dot"></span>',
@@ -1212,7 +1011,6 @@
           if (pins[i]) pins[i].setAttribute('data-accent', '');
         },
         lift: (on) => tiles.forEach((t) => t.toggleAttribute('data-lifted', on)),
-        pointer: (s) => cursor.set(Object.assign({}, s, { x: s.x + ox, y: s.y + oy })),
       },
     });
     pins = [...lane.querySelectorAll('.service-connector .ck-dot')];
@@ -1221,7 +1019,6 @@
 
     inst.on('destroy', () => {
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

@@ -21,10 +21,6 @@
  * - Grabbed tile: z-index on top, its block gets data-lifted (shadow grows, scale 1.03 over 240 ms).
  * - Layout, 520 px and wider: one row centred, tiles 1.5 tile widths apart, tile height = width x 1.3125. Narrower:
  *   2 x 2 block near the bottom. On resize, positions are rescaled proportionally and re-clamped.
- * - Demo, once on load: a fake cursor presses the "now playing" tile at 0.6 s, lifts it, flicks it to the upper right,
- *   then a second 2.7 s leg flicks it back into its slot. Moves are sent at a fixed 60 Hz and run through the same drag
- *   and glide code; the release point is solved so the glide lands exactly on the target. The first real press ends the
- *   demo for good. The demo then stops; after it the render loop runs only while a tile moves (see the last line).
  *
  * Options
  *   params.resistance  3..12, default 7      velocity decay per second; higher stops sooner
@@ -37,9 +33,9 @@
  *   fx.params                  copy of current params
  *   fx.setParams({tilt: 20})   change params live
  *   fx.setPaused(true|false)   freeze / resume
- *   fx.reset()                 params back to defaults, demo stopped, every tile glides home (0.5 s ease-out)
+ *   fx.reset()                 params back to defaults, every tile glides home (0.5 s ease-out)
  *   fx.setReducedMotion(bool)
- *   fx.destroy()               removes listeners, observers and the fake cursor
+ *   fx.destroy()               removes listeners, observers
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -74,10 +70,10 @@
  * - Each tile is a focusable role="button" labelled with its content (for example "Weather, 24 degrees, Lisbon. Drag
  *   or use arrow keys to move..."), with a focus ring on keyboard focus. Tab selects a tile, the arrow keys move it
  *   10 px (Shift: 28 px; scaled with the tile size), Home puts it back in its slot; a polite live region says
- *   "Weather moved." / "Weather is back in place.". A key also ends the demo. Keep essential content out of it.
- * - With reduced motion: no fake cursor, no glide, no tilt, no lift transition; the "now playing" tile rests at the
+ *   "Weather moved." / "Weather is back in place.".. Keep essential content out of it.
+ * - With reduced motion: no glide, no tilt, no lift transition; the "now playing" tile rests at the
  *   upper-right spot. Dragging still moves tiles, they just stop where released.
- * - The rAF loop runs only while something moves: once the demo is over and every tile is at rest (no drag, glide,
+ * - The rAF loop runs only while something moves: when every tile is at rest (no drag, glide,
  *   tilt or reset glide) it stops; the next press, drag, key or reset wakes it. It also stops when the tab is hidden,
  *   the tray is off screen or it is paused.
  */
@@ -101,7 +97,6 @@
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -119,8 +114,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -135,7 +151,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -161,13 +185,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -175,6 +207,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -204,8 +240,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -224,6 +263,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -240,6 +334,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -264,6 +362,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -273,6 +375,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -302,12 +406,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -340,149 +455,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'resistance', type: 'range', default: 7, min: 3, max: 12, step: 0.5 },
     { key: 'tilt', type: 'range', default: 12, min: 0, max: 24, step: 1 },
@@ -502,13 +474,6 @@
     ],
     LABELS = ['Weather, 24 degrees, Lisbon', 'Now playing', 'Focus, off', 'Message from Ana: On my way'],
     SHORT = ['Weather', 'Now playing', 'Focus', 'Message'];
-  const NAMES = ['Circle', 'Cross', 'Square', 'X'],
-    MARKS = [
-      '<circle cx="50" cy="50" r="34" fill="none" stroke="currentColor" stroke-width="8"/>',
-      '<path d="M50 16v68M16 50h68" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"/>',
-      '<rect x="20" y="20" width="60" height="60" fill="none" stroke="currentColor" stroke-width="8"/>',
-      '<path d="M24 24l52 52M76 24L24 76" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"/>',
-    ];
   let helpCount = 0;
   function mount(element, options) {
     const helpId = 'glyph-help-' + ++helpCount;
@@ -516,67 +481,44 @@
     const api = scope(element, CONTROLS, options);
     element.classList.add('glyph-stage');
     const cardOpt = options.card || null,
-      things = cardOpt && options.things ? THINGS : null;
+      things = options.things ? THINGS : null;
     if (things) element.classList.add('has-things');
-    const keys = !!(things && cardOpt.interactive);
-    if (cardOpt)
-      element.innerHTML =
-        '<div class="glyph-field"' +
-        (things ? '' : ' aria-hidden="true"') +
-        '>' +
-        [0, 1, 2, 3]
-          .map(
-            (i) =>
-              '<div class="play-glyph" data-glyph="' +
-              i +
-              '"' +
-              (keys
-                ? ' role="button" tabindex="0" aria-label="' +
-                  LABELS[i] +
-                  '. Drag or use arrow keys to move, Shift for bigger steps, Home to put it back."'
-                : things
-                  ? ' role="img" aria-label="' + LABELS[i] + '"'
-                  : '') +
-              '>' +
-              (cardOpt.item ? (things ? cardOpt.item(i, things[i]) : cardOpt.item(i)) : '') +
-              '</div>',
-          )
-          .join('') +
-        '</div>' +
-        (keys ? '<p class="cr-sr glyph-announcement" aria-live="polite"></p>' : '');
-    else
-      element.innerHTML =
-        '<div class="glyph-field" aria-label="Shape canvas">' +
-        NAMES.map(
-          (name, i) =>
-            '<button type="button" class="play-glyph" data-glyph="' +
+    const keys = !!(things && true);
+    element.innerHTML =
+      '<div class="glyph-field"' +
+      (things ? '' : ' aria-hidden="true"') +
+      '>' +
+      [0, 1, 2, 3]
+        .map(
+          (i) =>
+            '<div class="play-glyph" data-glyph="' +
             i +
-            '" aria-label="' +
-            name +
-            ' shape. Drag or use arrow keys to move." aria-describedby="' +
-            helpId +
-            '"><span class="glyph-face" aria-hidden="true"><svg viewBox="0 0 100 100">' +
-            MARKS[i] +
-            '</svg></span></button>',
-        ).join('') +
-        '<div class="glyph-hand" aria-hidden="true"></div></div><p class="cr-hint" id="' +
-        helpId +
-        '" data-cr-chrome>Drag and release · Tab to select · Arrow keys to move</p><p class="cr-sr glyph-announcement" aria-live="polite"></p>';
+            '"' +
+            (keys
+              ? ' role="button" tabindex="0" aria-label="' +
+                LABELS[i] +
+                '. Drag or use arrow keys to move, Shift for bigger steps, Home to put it back."'
+              : things
+                ? ' role="img" aria-label="' + LABELS[i] + '"'
+                : '') +
+            '>' +
+            (cardOpt.item ? (things ? cardOpt.item(i, things[i]) : cardOpt.item(i)) : '') +
+            '</div>',
+        )
+        .join('') +
+      '</div>' +
+      (keys ? '<p class="cr-sr glyph-announcement" aria-live="polite"></p>' : '');
     const field = element.querySelector('.glyph-field'),
       buttons = [...element.querySelectorAll('.play-glyph')],
-      announcement = element.querySelector('.glyph-announcement'),
-      hand = element.querySelector('.glyph-hand');
+      announcement = element.querySelector('.glyph-announcement');
     let letters = [],
       fieldW = 1,
       fieldH = 1,
-      drag = null,
-      previewCycle = -1,
-      previewReleased = false;
+      drag = null;
     let unit = 1,
       homes = [],
       spot = [0, 0],
-      leg = null,
-      frameDt = 1 / 60;
+      leg = null;
     function bound(l) {
       const nx = R.clamp(l.x, l.w * 0.5 + 4, fieldW - l.w * 0.5 - 4),
         ny = R.clamp(l.y, l.h * 0.5 + 4, fieldH - l.h * 0.5 - 4);
@@ -590,19 +532,16 @@
         oldH = fieldH;
       fieldW = field.clientWidth;
       fieldH = field.clientHeight;
-      const mobile = !cardOpt && !options.preview && api.width < 620,
-        custom = cardOpt && cardOpt.layout ? cardOpt.layout(fieldW, fieldH, api.params.glyphScale / 100) : null;
-      const fontSize = custom
-        ? custom.size
-        : (Math.min(fieldW * (mobile ? 0.4 : 0.224), fieldH * (mobile ? 0.4 : 0.78)) * api.params.glyphScale) / 100;
-      if (cardOpt) {
+      const custom = cardOpt.layout ? cardOpt.layout(fieldW, fieldH, api.params.glyphScale / 100) : null;
+      const fontSize = custom ? custom.size : (Math.min(fieldW * 0.224, fieldH * 0.78) * api.params.glyphScale) / 100;
+      {
         unit = 144.5 / (fontSize * 0.8);
         homes = custom ? custom.homes : [0, 1, 2, 3].map((i) => [fieldW * (0.16 + i * 0.226), fieldH * 0.5]);
         spot = custom ? custom.spot : [fieldW * 0.76, fontSize * 1.05 * 0.5 + 8];
       }
       letters = buttons.map((button, i) => {
-        const homeX = cardOpt ? homes[i][0] : fieldW * (mobile ? (i % 2 ? 0.73 : 0.27) : 0.16 + i * 0.226),
-          homeY = cardOpt ? homes[i][1] : fieldH * (mobile ? (i < 2 ? 0.28 : 0.73) : 0.54);
+        const homeX = homes[i][0],
+          homeY = homes[i][1];
         const old = letters[i],
           l = {
             x: reset || !old ? homeX : (old.x / oldW) * fieldW,
@@ -628,7 +567,6 @@
     api.on('replay', () => {
       release();
       layout(true);
-      previewCycle = -1;
       leg = null;
       if (announcement) announcement.textContent = 'Shapes are back in place.';
     });
@@ -651,7 +589,7 @@
       button.classList.add('is-grabbed');
       button.style.zIndex = '6';
       buttons.filter((b) => b !== button).forEach((b) => (b.style.zIndex = '3'));
-      if (cardOpt && cardOpt.lift) cardOpt.lift(index, true);
+      if (cardOpt.lift) cardOpt.lift(index, true);
     }
     function dragTo(x, y, now) {
       const l = letters[drag.index],
@@ -673,7 +611,7 @@
         b = buttons[index];
       letters[index].targetAngle = 0;
       b.classList.remove('is-grabbed');
-      if (cardOpt && cardOpt.lift) cardOpt.lift(index, false);
+      if (cardOpt.lift) cardOpt.lift(index, false);
       drag = null;
     }
     function release() {
@@ -683,31 +621,24 @@
       drop();
       api.wake();
     }
-    let handOff = false;
-    if (cardOpt && cardOpt.interactive)
-      buttons.forEach((button, index) => {
-        api.listen(button, 'pointerdown', (event) => {
-          if (event.button !== 0 || api.paused) return;
-          if (!handOff) {
-            handOff = true;
-            if (drag) drop();
-            if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-          }
-          const r = field.getBoundingClientRect();
-          grab(index, event.clientX, event.clientY, performance.now(), r, event.pointerId);
-          button.setPointerCapture(event.pointerId);
-          raise(index);
-          api.wake();
-        });
-        api.listen(button, 'pointermove', (event) => {
-          if (!drag || drag.index !== index || drag.pointerId !== event.pointerId || api.paused) return;
-          dragTo(event.clientX, event.clientY, performance.now());
-          api.paint();
-          api.wake();
-        });
-        api.listen(button, 'pointerup', release);
-        api.listen(button, 'pointercancel', release);
+    buttons.forEach((button, index) => {
+      api.listen(button, 'pointerdown', (event) => {
+        if (event.button !== 0 || api.paused) return;
+        const r = field.getBoundingClientRect();
+        grab(index, event.clientX, event.clientY, performance.now(), r, event.pointerId);
+        button.setPointerCapture(event.pointerId);
+        raise(index);
+        api.wake();
       });
+      api.listen(button, 'pointermove', (event) => {
+        if (!drag || drag.index !== index || drag.pointerId !== event.pointerId || api.paused) return;
+        dragTo(event.clientX, event.clientY, performance.now());
+        api.paint();
+        api.wake();
+      });
+      api.listen(button, 'pointerup', release);
+      api.listen(button, 'pointercancel', release);
+    });
     const RESTORE = 0.5;
     let back = null;
     function cubicBezier(x1, y1, x2, y2) {
@@ -745,7 +676,7 @@
       };
     }
     const outEase = cubicBezier(0.22, 1, 0.36, 1);
-    if (cardOpt && cardOpt.interactive) {
+    {
       buttons.forEach((button, index) => {
         api.listen(button, 'pointerdown', () => {
           if (back && drag && drag.index === index) back.from[index] = null;
@@ -756,10 +687,6 @@
         });
       });
       api.restore = () => {
-        if (!handOff) {
-          handOff = true;
-          if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-        }
         release();
         back = { t: 0, from: letters.map((l) => [l.x, l.y]) };
         letters.forEach((l) => {
@@ -775,11 +702,6 @@
         api.listen(button, 'keydown', (event) => {
           if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home'].includes(event.key) || api.paused) return;
           event.preventDefault();
-          if (!handOff) {
-            handOff = true;
-            if (drag) drop();
-            if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-          }
           if (drag && drag.index === index) release();
           if (back) back.from[index] = null;
           const l = letters[index],
@@ -819,52 +741,6 @@
         });
       }
     }
-    if (!cardOpt)
-      buttons.forEach((button, index) => {
-        api.listen(button, 'pointerdown', (event) => {
-          if (event.button !== 0 || api.paused) return;
-          const r = field.getBoundingClientRect();
-          grab(index, event.clientX, event.clientY, performance.now(), r, event.pointerId);
-          button.setPointerCapture(event.pointerId);
-          raise(index);
-          api.wake();
-        });
-        api.listen(button, 'pointermove', (event) => {
-          if (!drag || drag.index !== index || drag.pointerId !== event.pointerId || api.paused) return;
-          dragTo(event.clientX, event.clientY, performance.now());
-          api.paint();
-          api.wake();
-        });
-        api.listen(button, 'pointerup', () => {
-          release();
-          announcement.textContent = NAMES[index] + ' shape moved.';
-        });
-        api.listen(button, 'pointercancel', release);
-        api.listen(button, 'keydown', (event) => {
-          if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home'].includes(event.key) || api.paused) return;
-          event.preventDefault();
-          const l = letters[index],
-            step = event.shiftKey ? 28 : 10;
-          if (event.key === 'Home') {
-            l.x = l.homeX;
-            l.y = l.homeY;
-          } else {
-            l.x += event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
-            l.y += event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
-          }
-          l.vx = l.vy = 0;
-          l.targetAngle = 0;
-          bound(l);
-          api.paint();
-          announcement.textContent = NAMES[index] + ' shape moved.';
-        });
-      });
-    api.on('pause', (value) => {
-      if (value && !cardOpt) release();
-    });
-    api.on('visibility', (visible) => {
-      if (!visible && !cardOpt) release();
-    });
     api.on('motion', () => {
       release();
       leg = null;
@@ -873,180 +749,12 @@
       });
     });
     api.on('destroy', release);
-    const LEG = 2.7,
-      T_IN = 0.15,
-      T_PRESS = 0.6,
-      HZ = 60,
-      K_MOVE = 6,
-      K_FLICK = 32,
-      FLICK = 14,
-      EVENTS = K_FLICK + FLICK,
-      ORIGIN = { left: 0, top: 0 };
-    function pullAt(s, k) {
-      const mix = (p, q, u) => [p[0] + (q[0] - p[0]) * u, p[1] + (q[1] - p[1]) * u];
-      if (k <= K_FLICK) return mix(s.a, s.b, R.smooth(R.clamp((k - K_MOVE) / (K_FLICK - K_MOVE), 0, 1)));
-      const q = (k - K_FLICK) / FLICK;
-      return mix(s.b, s.r, q * q);
-    }
-    function cardHand(dt, time, reduced) {
-      const l = letters[1];
-      if (cardOpt.interactive && (handOff || (cardOpt.once && time >= 2 * LEG))) {
-        if (!handOff) {
-          handOff = true;
-          if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-        }
-        return;
-      }
-      if (reduced && cardOpt.interactive) {
-        handOff = true;
-      }
-      if (reduced) {
-        letters.forEach((g, i) => {
-          const p = i === 1 ? spot : homes[i];
-          g.x = p[0];
-          g.y = p[1];
-          g.vx = g.vy = g.angle = g.targetAngle = 0;
-        });
-        if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-        return;
-      }
-      if (dt > 0) frameDt += (dt - frameDt) * 0.1;
-      const n = Math.floor(time / LEG),
-        t = time - n * LEG;
-      if (!leg || leg.n !== n) {
-        const home = homes[1],
-          out = Math.hypot(l.x - home[0], l.y - home[1]) <= Math.hypot(l.x - spot[0], l.y - spot[1]);
-        leg = {
-          n,
-          k: 0,
-          skip: t > T_PRESS,
-          out,
-          to: out ? spot : home,
-          grip: [l.w * 0.15, l.h * 0.22],
-          a: [0, 0],
-          b: [0, 0],
-          r: [0, 0],
-          v: [0, 0],
-          x: 0,
-          y: 0,
-          end: -1,
-        };
-      }
-      while (!leg.skip && leg.k <= EVENTS && T_PRESS + leg.k / HZ <= t) {
-        const k = leg.k++,
-          te = T_PRESS + k / HZ,
-          now = (n * LEG + te) * 1000;
-        if (k === 0) {
-          const g = leg.grip,
-            a = [l.x + g[0], l.y + g[1]],
-            e = [leg.to[0] + g[0], leg.to[1] + g[1]],
-            FL = (leg.out ? 2.4 : 2) * l.w,
-            d = leg.out ? [1, 0] : [-0.857, 0.514];
-          const b = [e[0] - d[0] * FL, e[1] - d[1] * FL],
-            glide = frameDt / (1 - Math.exp(-api.params.resistance * frameDt)),
-            q = 1 - Math.pow(1 - 1 / FLICK, 2);
-          const r = [0, 1].map((j) => b[j] + (e[j] - b[j]) / (1 + HZ * glide * q));
-          leg.a = a;
-          leg.b = b;
-          leg.r = r;
-          leg.v = [(r[0] - b[0]) * q * HZ, (r[1] - b[1]) * q * HZ];
-          grab(1, a[0], a[1], now, ORIGIN, -1);
-          raise(1);
-          leg.x = a[0];
-          leg.y = a[1];
-        } else if (drag && drag.index === 1) {
-          const p = pullAt(leg, k);
-          if (p[0] !== leg.x || p[1] !== leg.y) {
-            dragTo(p[0], p[1], now);
-            leg.x = p[0];
-            leg.y = p[1];
-          }
-          if (k === EVENTS) {
-            drop();
-            leg.end = te;
-          }
-        }
-      }
-      if (leg.k > 0 && leg.end < 0 && !drag) leg.end = t;
-      let x = l.x + leg.grip[0],
-        y = l.y + leg.grip[1],
-        o = 0,
-        down = false;
-      if (leg.skip) o = 0;
-      else if (t < T_PRESS) {
-        const u = R.clamp((t - T_IN) / (T_PRESS - T_IN), 0, 1),
-          e = 1 - R.easeOut(u);
-        x += 36 * e;
-        y += 40 * e;
-        o = R.smooth(u);
-      } else if (leg.end < 0) {
-        x = leg.x;
-        y = leg.y;
-        o = 1;
-        down = true;
-      } else {
-        const s = Math.max(0, t - leg.end),
-          f = (1 - Math.exp(-28 * s)) / 28;
-        x = leg.x + leg.v[0] * f;
-        y = leg.y + leg.v[1] * f;
-        o = 1 - R.smooth(s / 0.45);
-      }
-      if (cardOpt.pointer) cardOpt.pointer({ x, y, opacity: o, down });
-    }
     api.frame(({ dt, time, params, reduced }) => {
       if (!letters.length) layout(true);
-      let moving = false,
-        previewHeld = false;
+      let moving = false;
       if (back) stepBack(dt, reduced);
-      if (cardOpt) cardHand(dt, time, reduced);
-      else if (options.preview && !reduced) {
-        const cycle = Math.floor(time / 8),
-          t = time % 8;
-        if (cycle !== previewCycle) {
-          layout(true);
-          previewCycle = cycle;
-          previewReleased = false;
-        }
-        const l = letters[1],
-          dx = Math.min(fieldW * 0.05, 30),
-          dy = Math.min(fieldH * 0.2, 56);
-        if (t >= 1 && t < 2.15) {
-          const u = R.smooth((t - 1) / 1.15);
-          l.x = l.homeX + dx * u;
-          l.y = l.homeY - dy * u;
-          l.vx = l.vy = 0;
-          l.targetAngle = params.tilt * 0.7 * Math.sin(u * Math.PI * 0.8);
-          previewHeld = true;
-        } else if (t >= 2.15 && t < 4.8 && !previewReleased) {
-          l.vx = dx * 2;
-          l.vy = -dy * 1.6;
-          l.targetAngle = 0;
-          previewReleased = true;
-        } else if (t >= 4.8) {
-          l.vx = l.vy = 0;
-          l.targetAngle = 0;
-          l.x = R.damp(l.x, l.homeX, 6, dt);
-          l.y = R.damp(l.y, l.homeY, 6, dt);
-        }
-        buttons[1].classList.toggle('is-grabbed', previewHeld);
-        const o =
-            t < 0.4
-              ? 0
-              : t < 1
-                ? R.smooth((t - 0.4) / 0.6)
-                : t < 2.15
-                  ? 1
-                  : t < 2.7
-                    ? 1 - R.smooth((t - 2.15) / 0.55)
-                    : 0,
-          hx = t < 2.15 ? l.x + l.w * 0.12 : l.x + l.w * 0.12 - (t - 2.15) * 20,
-          hy = l.y + l.h * 0.18;
-        hand.style.opacity = o.toFixed(3);
-        hand.style.transform = 'translate3d(' + hx + 'px,' + hy + 'px,0)';
-        hand.classList.toggle('is-down', previewHeld);
-      }
       letters.forEach((l, i) => {
-        if ((!drag || drag.index !== i) && !(previewHeld && i === 1)) {
+        if ((!drag || drag.index !== i) && true) {
           if (!reduced) {
             l.x += l.vx * dt;
             l.y += l.vy * dt;
@@ -1064,8 +772,8 @@
           'translate3d(' + (l.x - l.w / 2) + 'px,' + (l.y - l.h / 2) + 'px,0) rotate(' + l.angle + 'deg)';
         moving = moving || Math.abs(l.vx) + Math.abs(l.vy) + Math.abs(l.angle - l.targetAngle) > 0.01;
       });
-      element.dataset.phase = drag || previewHeld ? 'dragging' : moving ? 'settling' : 'resting';
-      return (options.preview && !(cardOpt && cardOpt.interactive && handOff)) || moving || !!drag || !!back;
+      element.dataset.phase = drag || false ? 'dragging' : moving ? 'settling' : 'resting';
+      return moving || !!drag || !!back;
     });
     const status = api.status;
     api.status = () => ({
@@ -1089,39 +797,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1156,8 +831,7 @@
     element.classList.add('inertia-drag');
     element.innerHTML = '<div class="fx-board" data-glyph-board></div>';
     const stage = element,
-      board = stage.querySelector('[data-glyph-board]'),
-      cursor = createCursor(stage, { inertia: false });
+      board = stage.querySelector('[data-glyph-board]');
     const F = 70 / 51.2;
     function layout(W, H, k) {
       k = k || 1;
@@ -1197,24 +871,18 @@
     let faces = [];
     const inst = mount(board, {
       params: options.params,
-      preview: true,
       things: true,
       card: {
         interactive: true,
-        once: true,
         layout,
         item: (i, thing) => '<div class="glyph-block">' + thing + '</div>',
         lift: (i, on) => {
           if (faces[i]) faces[i].toggleAttribute('data-lifted', on);
         },
-        pointer: cursor.set,
       },
     });
     faces = [...board.querySelectorAll('.glyph-block')];
 
-    inst.on('destroy', () => {
-      cursor.destroy();
-    });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {
       get params() {

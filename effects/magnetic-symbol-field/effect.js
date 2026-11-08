@@ -25,9 +25,6 @@
  *   7 cards, size = clamp(56, min(width / 5.2, height / 7.6), 80) px. Homes are fractions of the element (the WIDE and
  *   TALL tables), so the field fills and centres itself at any size; it is rebuilt when the shape flips and re-placed
  *   on resize. Card corners and mark stroke scale with --fx-k = size / 52.
- * - Demo, once on load: a fake cursor draws a figure-eight (Lissajous, 0.5 + 0.36 sin, 0.5 + 0.26 sin 2x) through the
- *   field for 6 s, fading in over 0.3 s and out over the last 0.4 s, and pushes the cards like a real pointer. The
- *   first real pointer move with actual movement, or a press, ends it for good.
  *
  * Options
  *   params.influenceRadius  80..360 px, default 230   how far from the pointer cards react
@@ -39,8 +36,8 @@
  *   const fx = mountMagneticSymbolField(element, {params: {...}});
  *   fx.params                          copy of current params
  *   fx.setParams({displacement: 120})  change params live
- *   fx.reset()                         params back to defaults, demo ended, cards spring home
- *   fx.destroy()                       removes listeners, the resize observer, the frame loop and the fake cursor
+ *   fx.reset()                         params back to defaults, cards spring home
+ *   fx.destroy()                       removes listeners, the resize observer, the frame loop
  * There is no setPaused or setReducedMotion in this version.
  *
  * Usage (plain HTML)
@@ -78,155 +75,12 @@
  *   essential content in them.
  * - Touch: the field keeps touch-action pan-y so vertical swipes still scroll the page; a touch push works until the
  *   finger lifts or the browser takes over the swipe.
- * - Reduced motion (prefers-reduced-motion, read on every frame): no demo cursor, cards stay at home and do not react.
+ * - Reduced motion (prefers-reduced-motion, read on every frame): cards stay at home and do not react.
  *   It is checked when a frame runs, so a live change of the setting shows on the next pointer move. To force it
  *   yourself, there is no option; set the media query or skip mounting.
  */
 (function (global) {
   'use strict';
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
 
   // ---- inlined from the shared card parts: a white card with a centred mark ----
   const GLYPHS = [
@@ -302,10 +156,7 @@
         'translate3d(' + body.x.toFixed(2) + 'px,' + body.y.toFixed(2) + 'px,0) rotate(' + tilt.toFixed(2) + 'deg)'
       );
     }
-    function previewPath(p) {
-      return { x: 0.5 + Math.sin(p + 0.9) * 0.36, y: 0.5 + Math.sin(2 * p + 0.9) * 0.26 };
-    }
-    lib.MagnetField = { makeBodies, stepBody, bodyTransform, previewPath, duration: 6000 };
+    lib.MagnetField = { makeBodies, stepBody, bodyTransform, duration: 6000 };
   })();
   const LIB = lib;
 
@@ -356,27 +207,6 @@
       mounted.frames.delete(f);
       global.cancelAnimationFrame(f);
     };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
-    };
     const watched = (Base) =>
       Base &&
       class extends Base {
@@ -413,8 +243,7 @@
     const listeners = new AbortController();
     const F = lib.MagnetField,
       stage = element,
-      board = stage.querySelector('[data-field]'),
-      cursor = createCursor(stage, { inertia: false });
+      board = stage.querySelector('[data-field]');
     const rq = matchMedia('(prefers-reduced-motion: reduce)');
     const C = [
       { key: 'influenceRadius', min: 80, max: 360, step: 1, default: 230, unit: 'px' },
@@ -456,7 +285,7 @@
       H = 1;
     function build() {
       board.innerHTML = '';
-      objects = list.map(([, , rot, glyph]) => {
+      objects = list.map(([rot, glyph]) => {
         const el = document.createElement('div');
         el.className = 'mf-object';
         el.dataset.rotation = rot;
@@ -493,41 +322,17 @@
       });
       draw();
     }
-    const LOOP = F.duration / 1000;
     let raf = 0,
       last = 0,
-      time = 0,
-      handOff = false,
       pointer = null;
-    function takeOver() {
-      if (handOff) return;
-      handOff = true;
-      pointer = null;
-      cursor.set({ x: 0, y: 0, opacity: 0, down: false });
-    }
-    function hand(dt) {
-      time += dt;
-      if (time >= LOOP) {
-        takeOver();
-        return;
-      }
-      const q = F.previewPath((time / LOOP) * Math.PI * 2);
-      pointer = { x: W * q.x, y: H * q.y };
-      cursor.set({
-        x: pointer.x,
-        y: pointer.y,
-        opacity: Math.max(0, Math.min(1, time / 0.3, (LOOP - time) / 0.4)),
-        down: false,
-      });
-    }
     function frame(now) {
       raf = 0;
       const dt = last ? Math.min(0.034, (now - last) / 1000) : 0;
       last = now;
       const reduce = rq.matches;
-      if (reduce) takeOver();
-      else if (!handOff) hand(dt);
-      let busy = !reduce && (!handOff || !!pointer);
+      if (reduce) {
+      }
+      let busy = !reduce && !!pointer;
       bodies.forEach((b, i) => {
         F.stepBody(
           b,
@@ -555,8 +360,6 @@
     board.addEventListener(
       'pointermove',
       (e) => {
-        if (e.pointerType === 'mouse' && !handOff && !e.movementX && !e.movementY) return;
-        takeOver();
         pointer = at(e);
         wake();
       },
@@ -565,14 +368,12 @@
     board.addEventListener(
       'pointerdown',
       (e) => {
-        takeOver();
         pointer = at(e);
         wake();
       },
       { signal: listeners.signal },
     );
     const away = () => {
-      if (!handOff) return;
       pointer = null;
       wake();
     };
@@ -586,7 +387,6 @@
       { signal: listeners.signal },
     );
     function restore() {
-      takeOver();
       pointer = null;
       wake();
     }
@@ -601,8 +401,8 @@
       wake();
     });
     observer0.observe(board);
-    if (rq.matches) handOff = true;
-    else wake();
+    if (rq.matches) {
+    } else wake();
 
     let params = Object.assign({}, DEFAULTS);
     const setParams = (next) => {
@@ -625,7 +425,6 @@
         listeners.abort();
         observer0.disconnect();
         cancelAnimationFrame(raf);
-        cursor.destroy();
         mounted.restore();
       },
     };

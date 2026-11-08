@@ -33,8 +33,6 @@
  * - The perforation is real holes: both halves grow a row of rounded teeth (a mask, --tk-teeth) that overlap by a few px
  *   at rest and separate when torn. The shadow is a drop-shadow on the whole face so it follows the teeth.
  * - Compact tickets: when a ticket is narrower than 170 px the row switches to .tk-compact and the button reads "Choose".
- * - Demo, once on load (about 5.6 s): a fake cursor wheels the tickets in (0.4 to 2 s), then hovers the middle ticket
- *   to tear it (3.5 to 4.9 s) and fades out. Any real wheel, pointer move, press or focus ends it for good.
  *
  * Options
  *   params.entrance  true / false, default true    scroll entrance; off = tickets always in place
@@ -52,7 +50,7 @@
  *   fx.setPaused(true|false)     freeze / resume (hover and input are ignored while paused)
  *   fx.reset()                   params back to defaults, tickets untorn, p glides back to the start in 0.5 s
  *   fx.setReducedMotion(bool)
- *   fx.destroy()                 removes listeners, observers and the fake cursor
+ *   fx.destroy()                 removes listeners, observers
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -89,7 +87,7 @@
  *   and keyboard focus tears its ticket. Clicks are prevented and announced in a polite live region; wire your own
  *   navigation there. The back face is aria-hidden.
  * - On touch a tap tears a ticket and keeps it torn; tapping it again or outside closes it.
- * - With reduced motion: no fake cursor, no entrance (tickets in place, front side up), and all CSS
+ * - With reduced motion: no entrance (tickets in place, front side up), and all CSS
  *   transitions are off, so the hover tear still happens but snaps without the bounce.
  * - The loop runs only while something moves and stops when the tab is hidden, the element is off screen or paused.
  */
@@ -112,7 +110,6 @@
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -130,8 +127,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -146,7 +164,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -172,13 +198,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -186,6 +220,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -215,8 +253,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -235,6 +276,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -251,6 +347,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -275,6 +375,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -284,6 +388,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -313,12 +419,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -349,149 +466,6 @@
     width = Math.max(1, element.clientWidth);
     height = Math.max(1, element.clientHeight);
     return api;
-  }
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
   }
 
   const CONTROLS = [
@@ -602,11 +576,11 @@
       '<span class="tk-amount ck-num">$' +
       pl.price +
       '</span>' +
-      (card ? '' : '<span class="tk-label ck-num" aria-hidden="true">TEAR ALONG LINE</span>') +
+      '' +
       '</div>' +
       '<div class="tk-stub">' +
       '<a href="#" class="tk-code"' +
-      (card && !card.interactive ? ' tabindex="-1"' : '') +
+      '' +
       ' aria-label="' +
       pl.cta +
       ', ' +
@@ -616,7 +590,7 @@
       '</span><span class="tk-cta ck-text" data-strong data-full="' +
       pl.cta +
       '">' +
-      (card ? 'Choose' : pl.cta) +
+      'Choose' +
       '</span></a></div></div>';
     const back =
       '<div class="tk-face tk-back" aria-hidden="true"><div class="tk-body"><span class="tk-corner"></span>' +
@@ -640,46 +614,30 @@
     options = options || {};
     const api = scope(element, CONTROLS, options);
     element.classList.add('tk-stage');
-    const card = options.card || null,
-      live = !!(card && card.interactive);
+    const card = options.card || null;
     const row =
-      '<div class="tk-row">' +
-      PLANS.map((pl, i) => ticket(pl, i, card && !card.layout ? card : null)).join('') +
-      '</div>';
-    if (card)
-      element.innerHTML =
-        '<div class="tk-view' +
-        (card.layout ? '' : ' tk-fade') +
-        '">' +
-        row +
-        '</div><p class="cr-sr tk-live" aria-live="polite"></p>';
-    else
-      element.innerHTML =
-        '<div class="tk-scroller" tabindex="0" aria-label="Pricing. Scroll to bring the tickets in."><div class="tk-runway"><div class="tk-pin"><div class="tk-view"><div class="tk-intro"><div class="tk-title" role="heading" aria-level="2">Pricing</div><div class="ck-hint">Pick a plan. Switch or cancel any time.</div></div>' +
-        row +
-        '</div></div></div></div>' +
-        '<p class="cr-hint" data-cr-chrome>Scroll to bring the tickets in · Hover a ticket to tear it</p><p class="cr-sr tk-live" aria-live="polite"></p><svg class="tk-hand" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 8.2-6.1 1.3-3.2 5.6z"/></svg>';
-    const view = element.querySelector('.tk-view'),
-      rowEl = element.querySelector('.tk-row'),
+      '<div class="tk-row">' + PLANS.map((pl, i) => ticket(pl, i, !card.layout ? card : null)).join('') + '</div>';
+    element.innerHTML =
+      '<div class="tk-view' +
+      (card.layout ? '' : ' tk-fade') +
+      '">' +
+      row +
+      '</div><p class="cr-sr tk-live" aria-live="polite"></p>';
+    const rowEl = element.querySelector('.tk-row'),
       tickets = [...element.querySelectorAll('.tk-ticket')],
       flips = tickets.map((t) => t.querySelector('.tk-flip')),
       scroller = element.querySelector('.tk-scroller'),
       runway = element.querySelector('.tk-runway'),
       pin = element.querySelector('.tk-pin'),
-      live2 = element.querySelector('.tk-live'),
-      hand = element.querySelector('.tk-hand');
-    if (card && !live) tickets.forEach((t) => t.querySelectorAll('a').forEach((a) => (a.tabIndex = -1)));
+      live2 = element.querySelector('.tk-live');
     let scroll = 0,
       glide = 0,
       p = 0,
       rise = 0,
       torn = [false, false, false],
-      handOff = false,
       back = null,
       stuck = -1;
-    const looping = (!!options.preview || !!card) && !(card && card.once);
-    const startP = () => (api.params.entrance && !api.reduced ? (looping ? 1 : 0) : 1);
-    const handDriven = () => (card ? !(live && handOff) : !!options.preview);
+    const startP = () => (api.params.entrance && !api.reduced ? 1 : 1);
     function setTorn(i, on) {
       on = !!on && api.params.tear;
       if (torn[i] === on) return;
@@ -709,20 +667,16 @@
         y = null,
         w = W,
         h = 0;
-      if (card && card.layout) {
+      if (card.layout) {
         const L = card.layout(W, H) || {};
         x = L.x || 0;
         y = L.y == null ? null : L.y;
         w = L.w || W;
         h = L.h || 0;
-      } else if (!card) {
-        const pad = Math.max(16, W * 0.06);
-        w = Math.min(W - pad * 2, 760);
-        x = (W - w) / 2;
       }
       const gap = Math.max(10, Math.min(20, w * 0.026)),
         tw = (w - gap * 2) / 3,
-        compact = (!!card && !card.layout) || tw < 170;
+        compact = !card.layout || tw < 170;
       rowEl.classList.toggle('tk-compact', compact);
       rowEl.querySelectorAll('.tk-cta').forEach((c) => {
         c.textContent = compact ? 'Choose' : c.dataset.full;
@@ -769,7 +723,6 @@
       back = null;
       if (reduced) {
         scroll = glide = p = 1;
-        if (live) take();
       }
       layout();
     });
@@ -782,16 +735,14 @@
     });
     flips.forEach((f, i) => {
       api.listen(f, 'pointerenter', (e) => {
-        if (e.pointerType === 'touch' || api.paused || handDriven()) return;
+        if (e.pointerType === 'touch' || api.paused || false) return;
         setTorn(i, true);
       });
       api.listen(f, 'pointerleave', (e) => {
-        if (e.pointerType === 'touch' || stuck === i || handDriven()) return;
+        if (e.pointerType === 'touch' || stuck === i || false) return;
         setTorn(i, false);
       });
       api.listen(f, 'focusin', () => {
-        if (card && !live) return;
-        if (live) take();
         setTorn(i, true);
       });
       api.listen(f, 'focusout', () => {
@@ -800,7 +751,7 @@
       api.listen(f, 'click', (e) => {
         const a = e.target.closest('a');
         if (a) e.preventDefault();
-        if (api.paused || (card && !live)) return;
+        if (api.paused || false) return;
         if (e.pointerType === 'touch' || lastType === 'touch') {
           stuck = torn[i] && stuck === i ? -1 : i;
           torn.forEach((_, j) => {
@@ -832,7 +783,7 @@
       if (scroll !== was) {
         back = null;
         api.wake();
-        if (card && card.touched && handOff) card.touched();
+        if (card.touched && true) card.touched();
       }
       return d - (scroll - was) * travelPx();
     }
@@ -841,7 +792,6 @@
         scroller,
         'scroll',
         () => {
-          if (options.preview) return;
           scroll = R.clamp(scroller.scrollTop / travelPx(), 0, 1);
           api.wake();
         },
@@ -849,20 +799,13 @@
       );
     }
     let drag = null;
-    function take() {
-      if (!live || handOff) return;
-      handOff = true;
-      untearAll();
-      if (card.pointer) card.pointer({ x: 0, y: 0, opacity: 0, wheel: false, down: false });
-      element.querySelectorAll('.tk-ticket:hover').forEach((t) => setTorn(+t.dataset.i, true));
-    }
     function release() {
       if (!drag) return;
       const pid = drag.id;
       drag = null;
       if (element.hasPointerCapture(pid)) element.releasePointerCapture(pid);
     }
-    if (live) {
+    {
       const WHEEL_GAP = 250,
         gap = card.wheelLatch ? (typeof card.wheelLatch === 'number' ? card.wheelLatch : WHEEL_GAP) : 0;
       let wheelAt = -Infinity,
@@ -878,7 +821,6 @@
         (e) => {
           if (e.ctrlKey || api.paused) return;
           if (!api.params.entrance || api.reduced) {
-            take();
             return;
           }
           const d = e.deltaY * (e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? api.height : 1);
@@ -908,19 +850,16 @@
                 return;
               }
             }
-            take();
             return;
           }
           if (gap) held = true;
           pushed = 0;
           e.preventDefault();
-          take();
           nudge(d);
         },
         { passive: false },
       );
       api.listen(element, 'pointermove', (e) => {
-        if (!handOff && !(e.pointerType === 'mouse' && !e.movementX && !e.movementY)) take();
         if (!drag || e.pointerId !== drag.id || api.paused) return;
         const dy = drag.y - e.clientY;
         drag.y = e.clientY;
@@ -930,7 +869,6 @@
         } else if (dy) window.scrollBy(0, dy);
       });
       api.listen(element, 'pointerdown', (e) => {
-        take();
         if (e.pointerType !== 'touch' || api.paused) return;
         release();
         drag = { id: e.pointerId, y: e.clientY };
@@ -944,12 +882,10 @@
         if (!step || api.paused || e.altKey || e.ctrlKey || e.metaKey || !api.params.entrance || api.reduced) return;
         if ((step < 0 && scroll <= 0) || (step > 0 && scroll >= 1)) return;
         e.preventDefault();
-        take();
         nudge(step * (k.startsWith('Page') ? api.height : KEY));
       });
       api.on('destroy', release);
       api.restore = () => {
-        take();
         release();
         untearAll();
         const s = startP();
@@ -965,94 +901,8 @@
       };
     }
     let cycle = -1,
-      handTime = 0,
-      handDown = false;
-    const LOOP = 8,
-      ONCE = 5.6;
-    function mid() {
-      const er = element.getBoundingClientRect(),
-        r = tickets[1].querySelector('.tk-stub').getBoundingClientRect();
-      return { x: r.left - er.left + r.width * 0.62, y: r.top - er.top + r.height * 0.55 };
-    }
-    function rest() {
-      return { x: api.width * 0.5 + Math.min(90, api.width * 0.2), y: api.height * 0.6 };
-    }
-    function lerpPt(a, b, u) {
-      u = R.smooth(u);
-      return { x: R.mix(a.x, b.x, u), y: R.mix(a.y, b.y, u) };
-    }
-    function script(t, once) {
-      const ent = api.params.entrance,
-        tearOn = api.params.tear,
-        M = mid(),
-        S = rest();
-      let pos = S,
-        o = 1,
-        wheel = false,
-        hover = false,
-        target = null;
-      if (once) {
-        o = t < 0.3 ? t / 0.3 : t > 5.2 ? Math.max(0, 1 - (t - 5.2) / 0.3) : 1;
-        if (ent && t >= 0.4 && t < 2) {
-          wheel = true;
-          target = R.clamp((t - 0.4) / 1.4, 0, 1);
-        } else if (ent && t >= 2) target = 1;
-        if (t < 3) pos = S;
-        else if (t < 3.5) pos = lerpPt(S, M, (t - 3) / 0.5);
-        else if (t < 4.9) pos = M;
-        else pos = lerpPt(M, S, (t - 4.9) / 0.4);
-        hover = tearOn && t >= 3.5 && t < 4.9;
-      } else {
-        o = t < 0.3 ? t / 0.3 : t > 7.4 ? Math.max(0, 1 - (t - 7.4) / 0.4) : 1;
-        if (t < 0.4) pos = S;
-        else if (t < 0.9) pos = lerpPt(S, M, (t - 0.4) / 0.5);
-        else if (t < 2.3) pos = M;
-        else if (t < 2.7) pos = lerpPt(M, S, (t - 2.3) / 0.4);
-        else pos = S;
-        hover = tearOn && t >= 0.9 && t < 2.3;
-        if (ent) {
-          if (t >= 2.9 && t < 3.9) {
-            wheel = true;
-            target = 1 - (t - 2.9);
-          } else if (t >= 3.9 && t < 4.8) target = 0;
-          else if (t >= 4.8 && t < 5.8) {
-            wheel = true;
-            target = t - 4.8;
-          } else target = 1;
-        }
-      }
-      return { pos, o, wheel, hover, target };
-    }
-    function runHand(dt) {
-      const once = !!(card && card.once);
-      if (live && (handOff || (once && handTime + dt >= ONCE))) {
-        take();
-        return;
-      }
-      handTime += dt;
-      const L = once ? ONCE : LOOP,
-        c = Math.floor(handTime / L),
-        t = handTime % L;
-      if (c !== cycle) {
-        cycle = c;
-        if (!once && c > 0) untearAll();
-      }
-      const h = script(once ? Math.min(handTime, ONCE) : t, once);
-      if (h.target !== null && api.params.entrance) {
-        scroll = R.clamp(h.target, 0, 1);
-      }
-      setTorn(1, h.hover);
-      if (card && card.pointer) card.pointer({ x: h.pos.x, y: h.pos.y, opacity: h.o, wheel: h.wheel, down: false });
-      else if (hand) {
-        hand.style.opacity = h.o.toFixed(3);
-        hand.style.transform = 'translate3d(' + h.pos.x.toFixed(1) + 'px,' + h.pos.y.toFixed(1) + 'px,0)';
-        hand.classList.toggle('is-wheel', h.wheel);
-      }
-    }
+      handTime = 0;
     api.frame(({ dt, reduced, params }) => {
-      const handActive = !reduced && (options.preview || !!card) && !(live && handOff);
-      if (handActive) runHand(dt);
-      else if (card && card.pointer && reduced) card.pointer({ opacity: 0, wheel: false });
       if (reduced || !params.entrance) {
         scroll = glide = p = 1;
       } else if (back) {
@@ -1069,14 +919,14 @@
         if (Math.abs(glide - scroll) < 1e-5 && Math.abs(p - scroll) < 1e-5) p = glide = scroll;
       }
       render();
-      return handActive || !!back || Math.abs(p - scroll) > 1e-5;
+      return !!back || Math.abs(p - scroll) > 1e-5;
     });
     scroll = glide = p = startP();
     apply();
     layout();
     render();
     const status = api.status;
-    api.status = () => ({ ...status(), scroll, glide, p, torn: torn.slice(), handOff });
+    api.status = () => ({ ...status(), scroll, glide, p, torn: torn.slice() });
     return api;
   }
 
@@ -1092,39 +942,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1161,8 +978,7 @@
       '<div class="fx-board" data-tk-board tabindex="0" role="group" aria-label="Three pricing tickets. Scroll to bring them in, hover to tear."></div>';
     const panelZone = () => ({ right: 0, bottom: 0 });
     const stage = element,
-      board = stage.querySelector('[data-tk-board]'),
-      cursor = createCursor(stage);
+      board = stage.querySelector('[data-tk-board]');
     const layout = (W, H) => {
       const Z = panelZone(stage, 3);
       const side = !matchMedia('(max-width: 760px)').matches,
@@ -1178,16 +994,11 @@
       card: {
         layout,
         interactive: true,
-        once: true,
         wheelLatch: true,
         endPush: true,
-        pointer: cursor.set,
       },
     });
 
-    inst.on('destroy', () => {
-      cursor.destroy();
-    });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {
       get params() {

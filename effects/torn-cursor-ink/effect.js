@@ -30,9 +30,6 @@
  *   it leaves, half-life 0.18 s.
  * - Rendering: one WebGL fragment shader over the sheet (one quad). Without WebGL a canvas 2D fallback draws the same shape in
  *   3 px solid ink squares (no characters).
- * - Demo, once on load (6 s): a fake cursor sweeps two leaning figure eights, quick through the crossings and slow
- *   into the turns (theta = 2 PI t / 6, u = theta + 0.11 sin 4 theta, x = 0.5 + 0.29 sin 2u + 0.05 sin(3u + 0.6),
- *   y = 0.5 + 0.21 sin 4u + 0.04 cos u, in sheet units with y down), fading in over 0.4 s and out over the last 0.45 s. The first real mouse move with actual movement, or a press, ends it for good.
  * - Touch: the ink appears only while a finger is pressed and dragging (pointer capture); lifting fades it.
  *
  * Options
@@ -52,9 +49,9 @@
  *   fx.params                 copy of current params
  *   fx.setParams({tear: 120}) change params live (values are clamped to the ranges above)
  *   fx.setPaused(true|false)  freeze / resume
- *   fx.reset()                params back to defaults, demo ended, ink fades out quickly (0.08 s half-life)
+ *   fx.reset()                params back to defaults, ink fades out quickly (0.08 s half-life)
  *   fx.setReducedMotion(bool|null)
- *   fx.destroy()              removes listeners, observers, the fake cursor and releases the WebGL context
+ *   fx.destroy()              removes listeners, observers and releases the WebGL context
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -89,10 +86,9 @@
  * - SSR: only call it in the browser.
  *
  * Accessibility and reduced motion
- * - The canvas and fake cursor are aria-hidden; nothing is focusable and there is no keyboard control. The effect is
+ * - The canvas are aria-hidden; nothing is focusable and there is no keyboard control. The effect is
  *   decorative; keep real content outside it.
- * - With reduced motion: no demo cursor and no animation loop. Before the first real move a still frame of the demo
- *   trail is shown; after it, the ink sits exactly under the pointer with no trail, no lag and no fade, and disappears
+ * - With reduced motion: and no animation loop. the ink sits exactly under the pointer with no trail, no lag and no fade, and disappears
  *   when the pointer leaves.
  * - The loop sleeps once the ink has fully faded, and stops when the tab is hidden, the element is off screen or it is
  *   paused.
@@ -102,15 +98,12 @@
 
   // ---- inlined from the shared runtime: math helpers ----
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-  const R = {};
-
   // ---- inlined from the shared runtime: lifecycle ----
   // One requestAnimationFrame loop that runs only while something moves; pauses when the tab is hidden, the element is
   // off screen or setPaused(true); follows prefers-reduced-motion live; re-measures on resize; destroy() removes every
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -128,8 +121,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -144,7 +158,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -170,13 +192,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -184,6 +214,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -213,8 +247,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -233,6 +270,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -249,6 +341,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -273,6 +369,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -282,6 +382,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -311,12 +413,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -349,149 +462,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'size', type: 'range', default: 8, min: 2, max: 20, step: 0.5 },
     { key: 'lag', type: 'range', default: 40, min: 5, max: 200, step: 5 },
@@ -505,8 +475,7 @@
   ];
 
   // ---- the effect ----
-  const SLOTS = 22,
-    LOOP = 6;
+  const SLOTS = 22;
   const PACE = { presence: 0.18, restore: 0.08, minGap: 25, markScale: 0.64, smallest: 0.5 };
   const INK = { chars: ' .:-=+*#%@', weight: 600 };
   const LOOK = {
@@ -658,20 +627,13 @@ void main(){
   function mount(element, options) {
     options = options || {};
     const api = scope(element, CONTROLS, options);
-    const cardOpt = options.card || null,
-      live = !!(cardOpt && cardOpt.interactive),
-      handed = !!(options.preview || cardOpt);
+    const cardOpt = options.card || null;
     element.classList.add('ink-stage');
-    if (cardOpt)
-      element.innerHTML =
-        '<div class="ck-panel ink-sheet ink-fill" data-size="lg"><div class="ink-face"><span class="ck-text" data-strong>Field notes</span><span class="ck-dot" data-accent aria-hidden="true"></span></div><canvas class="ink-gl" aria-hidden="true"></canvas></div>';
-    else
-      element.innerHTML =
-        '<div class="ink-sheet"><div class="ink-face"><span class="ink-label">Field notes</span><i class="ink-dot" aria-hidden="true"></i></div><canvas class="ink-gl" aria-hidden="true"></canvas></div>' +
-        '<p class="cr-hint" data-cr-chrome>Move across the page to tear holes · On touch, press and drag</p><div class="ink-hand" aria-hidden="true"></div>';
-    const sheet = element.querySelector('.ink-sheet'),
-      canvas = element.querySelector('.ink-gl'),
-      handEl = element.querySelector('.ink-hand');
+    element.innerHTML =
+      '<div class="ck-panel ink-sheet ink-fill" data-size="lg"><div class="ink-face"><span class="ck-text" data-strong>Field notes</span><span class="ck-dot" data-accent aria-hidden="true"></span></div><canvas class="ink-gl" aria-hidden="true"></canvas></div>';
+    const sheet = element.querySelector('.ink-sheet');
+    let canvas = element.querySelector('.ink-gl');
+    const phased = !!cardOpt.startup;
     const glyphs = INK.chars.length;
     let gl = null,
       loc = null,
@@ -679,11 +641,20 @@ void main(){
       lose = null,
       tex = null,
       atlasPx = 0;
+    let program = null,
+      parts = [],
+      quad = null,
+      parallel = null,
+      rendererReady = false,
+      contextLost = false;
     if (document.fonts)
       document.fonts.load(INK.weight + ' 16px "Geist"').then(
         () => {
           atlasPx = 0;
-          if (!api.destroyed) api.paint();
+          if (!api.destroyed) {
+            api.invalidatePreparation();
+            api.paint();
+          }
         },
         () => {},
       );
@@ -710,57 +681,143 @@ void main(){
       ])
         gl.texParameteri(gl.TEXTURE_2D, k, v);
     }
-    try {
+    function acquireGL() {
       gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: false });
       if (gl) {
-        const prog = gl.createProgram(),
-          parts = [
-            [gl.VERTEX_SHADER, VERT],
-            [gl.FRAGMENT_SHADER, FRAG],
-          ].map(([kind, text]) => {
-            const sh = gl.createShader(kind);
-            gl.shaderSource(sh, text);
-            gl.compileShader(sh);
-            gl.attachShader(prog, sh);
-            return sh;
-          });
-        gl.linkProgram(prog);
-        if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
-          throw new Error(parts.map((sh) => gl.getShaderInfoLog(sh)).join('\n') + gl.getProgramInfoLog(prog));
-        gl.useProgram(prog);
-        loc = {};
-        for (const n of [
-          'uMark',
-          'uHead',
-          'uView',
-          'uRip',
-          'uShape',
-          'uGrid',
-          'uRes',
-          'uBase',
-          'uTint',
-          'uSpeck',
-          'uGlyphs',
-        ])
-          loc[n] = gl.getUniformLocation(prog, n);
-        gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-        gl.bufferData(gl.ARRAY_BUFFER, Float32Array.of(-1, -1, 1, -1, -1, 1, 1, 1), gl.STATIC_DRAW);
-        const corner = gl.getAttribLocation(prog, 'aCorner');
-        gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 8, 0);
-        gl.enableVertexAttribArray(corner);
-        tex = gl.createTexture();
-        gl.disable(gl.BLEND);
         lose = gl.getExtension('WEBGL_lose_context');
+        parallel = phased ? gl.getExtension('KHR_parallel_shader_compile') : null;
+        const ownCanvas = canvas;
+        api.listen(ownCanvas, 'webglcontextlost', (event) => {
+          if (ownCanvas !== canvas || api.destroyed) return;
+          event.preventDefault();
+          contextLost = true;
+          api.invalidatePreparation();
+          if (!api.preparing) {
+            try {
+              fallback2D();
+              api.paint();
+              api.wake();
+            } catch (error) {
+              api.destroy();
+            }
+          }
+        });
       }
-    } catch (e) {
-      gl = null;
     }
-    if (!gl) ctx = canvas.getContext('2d');
-    api.cleanup(() => {
+    function submitProgram() {
+      if (contextLost) throw new Error('Ink WebGL context lost during preparation');
+      program = gl.createProgram();
+      parts = [
+        [gl.VERTEX_SHADER, VERT],
+        [gl.FRAGMENT_SHADER, FRAG],
+      ].map(([kind, text]) => {
+        const sh = gl.createShader(kind);
+        gl.shaderSource(sh, text);
+        gl.compileShader(sh);
+        gl.attachShader(program, sh);
+        return sh;
+      });
+      gl.linkProgram(program);
+    }
+    function linkReady() {
+      if (contextLost) throw new Error('Ink WebGL context lost during preparation');
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+        throw new Error(parts.map((sh) => gl.getShaderInfoLog(sh)).join('\n') + gl.getProgramInfoLog(program));
+    }
+    function bindRenderer() {
+      if (contextLost) throw new Error('Ink WebGL context lost during preparation');
+      gl.useProgram(program);
+      loc = {};
+      for (const n of [
+        'uMark',
+        'uHead',
+        'uView',
+        'uRip',
+        'uShape',
+        'uGrid',
+        'uRes',
+        'uBase',
+        'uTint',
+        'uSpeck',
+        'uGlyphs',
+      ])
+        loc[n] = gl.getUniformLocation(program, n);
+      quad = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.bufferData(gl.ARRAY_BUFFER, Float32Array.of(-1, -1, 1, -1, -1, 1, 1, 1), gl.STATIC_DRAW);
+      const corner = gl.getAttribLocation(program, 'aCorner');
+      gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 8, 0);
+      gl.enableVertexAttribArray(corner);
+      tex = gl.createTexture();
+      if (!quad || !tex) throw new Error('Ink WebGL allocation failed');
+      gl.disable(gl.BLEND);
+      rendererReady = true;
+    }
+    function releaseGL() {
+      const old = gl;
+      gl = null;
+      rendererReady = false;
+      if (old)
+        try {
+          if (tex) old.deleteTexture(tex);
+          if (quad) old.deleteBuffer(quad);
+          parts.forEach((sh) => old.deleteShader(sh));
+          if (program) old.deleteProgram(program);
+          if (lose) lose.loseContext();
+        } catch (_) {}
+      tex = quad = program = loc = lose = parallel = null;
+      parts = [];
+      atlasPx = 0;
+    }
+    function fallback2D() {
+      releaseGL();
+      const replacement = document.createElement('canvas');
+      replacement.className = 'ink-gl';
+      replacement.setAttribute('aria-hidden', 'true');
+      canvas.replaceWith(replacement);
+      canvas = replacement;
+      ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Ink renderer unavailable');
+      contextLost = false;
+      rendererReady = true;
+    }
+    if (!phased) {
       try {
-        if (lose) lose.loseContext();
-      } catch (e) {}
-    });
+        acquireGL();
+        if (gl) {
+          submitProgram();
+          linkReady();
+          bindRenderer();
+        } else fallback2D();
+      } catch (error) {
+        fallback2D();
+      }
+    }
+    async function prepareRenderer(phase) {
+      if (rendererReady) return;
+      try {
+        await phase(acquireGL, 'ink-context');
+        if (!gl) {
+          await phase(fallback2D, 'ink-fallback');
+          return;
+        }
+        await phase(submitProgram, 'ink-shader-submit');
+        if (parallel) {
+          let done = false;
+          while (!done)
+            done = await phase(() => {
+              if (contextLost) throw new Error('Ink WebGL context lost during preparation');
+              return gl.getProgramParameter(program, parallel.COMPLETION_STATUS_KHR);
+            }, 'ink-shader-poll');
+        }
+        await phase(linkReady, 'ink-shader-status');
+        await phase(bindRenderer, 'ink-bind-renderer');
+      } catch (error) {
+        if (api.destroyed || cardOpt.startup.signal.aborted || error.name === 'AbortError') throw error;
+        await phase(fallback2D, 'ink-fallback');
+      }
+    }
+    api.cleanup(releaseGL);
     let dpr = 1;
     function fit() {
       dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -785,7 +842,6 @@ void main(){
       touch: false,
     });
     const S = fresh();
-    let frozen = null;
     const toward = (dt, h) => 1 - Math.pow(2, -dt / Math.max(h, 0.001));
     const trailCap = (p) => Math.round(Math.min(SLOTS - 1, Math.max(0, p.traceMarks)));
     function dropMark(now) {
@@ -833,6 +889,7 @@ void main(){
       });
     }
     function render(st) {
+      if (!rendererReady || contextLost) throw new Error('Ink renderer is not ready');
       fit();
       const p = api.params,
         W = canvas.width,
@@ -901,82 +958,11 @@ void main(){
           ctx.fillRect(x, y, cs, cs);
         }
     }
-    const HAND = {
-      cx: 0.5,
-      cy: 0.5,
-      wide: 0.29,
-      lean: 0.05,
-      tall: 0.21,
-      sway: 0.04,
-      rush: 0.11,
-      fadeIn: 0.4,
-      fadeOut: 0.45,
-      rehearse: 0.8,
-    };
-    function hand(t) {
-      const loopT = ((t % LOOP) + LOOP) % LOOP,
-        th = (loopT / LOOP) * Math.PI * 2,
-        ph = th + HAND.rush * Math.sin(4 * th);
-      const x = HAND.cx + HAND.wide * Math.sin(2 * ph) + HAND.lean * Math.sin(3 * ph + 0.6);
-      const y = HAND.cy + HAND.tall * Math.sin(4 * ph) + HAND.sway * Math.cos(ph);
-      const rise = Math.min(1, Math.max(0, t / HAND.fadeIn));
-      const o = cardOpt && cardOpt.once ? Math.min(rise, Math.max(0, (LOOP - t) / HAND.fadeOut)) : rise;
-      return { x, y, o };
-    }
-    let handOff = false;
-    const handOn = () => handed && !handOff;
-    function showHand(h) {
-      const x = sheet.offsetLeft + h.x * sheet.offsetWidth,
-        y = sheet.offsetTop + h.y * sheet.offsetHeight;
-      if (cardOpt) {
-        if (cardOpt.pointer) cardOpt.pointer({ x, y, opacity: h.o, down: false });
-      } else if (handEl) {
-        handEl.style.opacity = h.o.toFixed(3);
-        handEl.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
-      }
-    }
-    function follow(h) {
-      S.pointer.x = h.x;
-      S.pointer.y = 1 - h.y;
-      S.want = cardOpt && cardOpt.once ? (h.o > 0.5 ? 1 : 0) : 1;
-      if (!S.placed) {
-        S.head.x = S.pointer.x;
-        S.head.y = S.pointer.y;
-        S.placed = true;
-      }
-    }
-    function rehearse() {
-      const dt = 1 / 60,
-        steps = Math.round(HAND.rehearse / dt);
-      Object.assign(S, fresh(), { clock: -HAND.rehearse, show: 1 });
-      for (let i = 0; i < steps; i++) {
-        follow(hand(S.clock + dt));
-        S.show = 1;
-        advance(dt);
-      }
-      S.clock = 0;
-      frozen = {
-        head: { x: S.head.x, y: S.head.y },
-        dir: S.dir,
-        show: 1,
-        clock: 0,
-        marks: S.marks.map((m) => Object.assign({}, m)),
-      };
-    }
     function begin() {
       const touch = S.touch;
       Object.assign(S, fresh(), { touch });
-      if (!handed) return;
-      rehearse();
-      if (live) Object.assign(S, fresh(), { touch });
+      return;
     }
-    function takeOver() {
-      if (handOff) return;
-      handOff = true;
-      S.want = 0;
-      showHand({ x: 0.5, y: 0.5, o: 0 });
-    }
-    const realOK = () => !handed || handOff;
     function feed(e) {
       const r = sheet.getBoundingClientRect(),
         x = (e.clientX - r.left) / r.width,
@@ -1000,17 +986,10 @@ void main(){
         api.paint();
       } else api.wake();
     }
-    const quiet = (e) => e.pointerType === 'mouse' && !e.movementX && !e.movementY;
     api.listen(element, 'pointermove', (e) => {
-      if (live && !handOff) {
-        if (quiet(e)) return;
-        takeOver();
-      }
-      if (realOK()) feed(e);
+      feed(e);
     });
     api.listen(element, 'pointerdown', (e) => {
-      if (live && !handOff) takeOver();
-      if (!realOK()) return;
       if (e.pointerType !== 'mouse') {
         S.touch = true;
         S.placed = false;
@@ -1034,26 +1013,23 @@ void main(){
     api.listen(element, 'pointerleave', (e) => {
       if (e.pointerType !== 'mouse' && S.touch) return;
       S.want = 0;
-      if (api.reduced && realOK()) {
+      if (api.reduced && true) {
         S.show = 0;
         api.paint();
       } else api.wake();
     });
-    if (live)
-      api.restore = () => {
-        takeOver();
-        S.want = 0;
-        S.touch = false;
-        S.half = PACE.restore;
-        S.restoring = true;
-        if (api.reduced) {
-          S.show = 0;
-          S.marks = [];
-          api.paint();
-        } else api.wake();
-      };
+    api.restore = () => {
+      S.want = 0;
+      S.touch = false;
+      S.half = PACE.restore;
+      S.restoring = true;
+      if (api.reduced) {
+        S.show = 0;
+        S.marks = [];
+        api.paint();
+      } else api.wake();
+    };
     api.on('replay', () => {
-      handOff = false;
       begin();
     });
     api.on('resize', () => {
@@ -1061,15 +1037,8 @@ void main(){
     });
     api.frame(({ dt, reduced }) => {
       if (reduced) {
-        showHand({ x: 0.5, y: 0.5, o: 0 });
-        render(handOn() && frozen ? frozen : S);
+        render(S);
         return false;
-      }
-      if (live && handOn() && cardOpt.once && S.clock + dt >= LOOP) takeOver();
-      if (handOn()) {
-        const h = hand(S.clock + dt);
-        follow(h);
-        showHand(h);
       }
       advance(dt);
       if (S.restoring && S.show < 0.02) {
@@ -1077,7 +1046,7 @@ void main(){
         S.restoring = false;
         S.half = PACE.presence;
       }
-      if (!handOn() && S.want === 0 && S.show < 0.002) {
+      if (S.want === 0 && S.show < 0.002) {
         S.show = 0;
         S.marks = [];
         S.placed = false;
@@ -1087,14 +1056,27 @@ void main(){
       render(S);
       return true;
     });
-    begin();
-    api.paint();
+    if (phased)
+      api.prepare(async (phase) => {
+        await prepareRenderer(phase);
+        await phase(() => {
+          if (contextLost) fallback2D();
+          fit();
+          if (gl) glyphStrip(Math.max(3, Math.round(api.params.cell * dpr)));
+        }, 'ink-texture');
+        await phase(() => {
+          begin();
+        }, 'ink-rehearse');
+      });
+    else {
+      begin();
+      api.paint();
+    }
     const status = api.status;
     api.status = () =>
       Object.assign(status(), {
         marks: S.marks.length,
         alpha: +S.show.toFixed(3),
-        handOff,
         renderer: gl ? 'webgl' : 'canvas2d',
       });
     return api;
@@ -1112,39 +1094,6 @@ void main(){
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1178,16 +1127,14 @@ void main(){
     };
     element.classList.add('torn-cursor-ink');
     element.innerHTML = '<div class="fx-board"><div class="ink-box" data-ink></div></div>';
-    const panelZone = () => ({ right: 0, bottom: 0 });
     const stage = element,
-      box = stage.querySelector('[data-ink]'),
-      cursor = createCursor(stage, { inertia: false });
+      box = stage.querySelector('[data-ink]');
     let inst = null;
     function place() {
       const W = stage.clientWidth,
         H = stage.clientHeight,
         m = W < 600 ? 20 : 40,
-        x0 = false ? panelZone(stage).right + 40 : m;
+        x0 = m;
       box.style.left = x0 + 'px';
       box.style.top = m + 'px';
       box.style.width = W - m - x0 + 'px';
@@ -1195,21 +1142,12 @@ void main(){
     }
 
     place();
-    inst = mount(box, {
-      params: options.params,
-      preview: true,
-      card: {
-        interactive: true,
-        once: true,
-        pointer: (s) => cursor.set(Object.assign({}, s, { x: s.x + box.offsetLeft, y: s.y + box.offsetTop })),
-      },
-    });
+    inst = mount(box, { params: options.params, card: { interactive: true } });
     const observer0 = new ResizeObserver(place);
     observer0.observe(stage);
 
     inst.on('destroy', () => {
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

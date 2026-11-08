@@ -23,8 +23,6 @@
  *   noise is plain integer arithmetic, so the tear has the same shapes, with a softer edge.
  * - Layout: the site is centred, width min(760, stage width - 64), height min(width x 0.62, stage height - 64).
  *   At 760 px and below it fills the stage with a 16 px inset.
- * - Demo, once on load: a fake cursor moves to the "Work" pill, presses it at 1.1 s (the real switch runs) and fades
- *   out by 6 s. The first real press anywhere on the effect ends the demo for good. After that, pills switch pages.
  *
  * Options
  *   params.grain   3..18, default 8.2          noise cells per canvas height; higher = smaller, denser shards
@@ -43,7 +41,7 @@
  *   fx.params                      copy of current params
  *   fx.setParams({sheet: 'stone'}) change params live
  *   fx.setPaused(true|false)       freeze / resume; pills ignore clicks while paused
- *   fx.reset()                     params back to defaults, demo stopped; the site fades out (200 ms), returns to
+ *   fx.reset()                     params back to defaults, ; the site fades out (200 ms), returns to
  *                                  Index with no sheet and fades in (300 ms). Nothing replays.
  *   fx.setReducedMotion(bool)
  *   fx.destroy()                   stops the loop, removes listeners and observers, releases the WebGL context
@@ -78,7 +76,7 @@
  * Accessibility and reduced motion
  * - Pills are real buttons; the current page has aria-current="page". The canvas is aria-hidden.
  * - A visually hidden polite live region (.tr-live) announces the page being switched to ("Work.", "Gallery." ...).
- * - With reduced motion: no fake cursor, no sheet; a pill click swaps the page at once.
+ * - With reduced motion: no sheet; a pill click swaps the page at once.
  * - The loop stops when the tab is hidden, the effect is off screen or it is paused.
  */
 (function (global) {
@@ -86,20 +84,12 @@
 
   // ---- inlined from the shared runtime: math helpers ----
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
-  const mix = (a, b, t) => a + (b - a) * t;
-  const smooth = (t) => {
-    t = clamp(t, 0, 1);
-    return t * t * (3 - 2 * t);
-  };
-  const R = { smooth, mix };
-
   // ---- inlined from the shared runtime: lifecycle ----
   // One requestAnimationFrame loop that runs only while something moves; pauses when the tab is hidden, the element is
   // off screen or setPaused(true); follows prefers-reduced-motion live; re-measures on resize; destroy() removes every
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -117,8 +107,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -133,7 +144,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -159,13 +178,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -173,6 +200,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -202,8 +233,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -222,6 +256,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -238,6 +327,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -262,6 +355,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -271,6 +368,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -300,12 +399,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -336,149 +446,6 @@
     width = Math.max(1, element.clientWidth);
     height = Math.max(1, element.clientHeight);
     return api;
-  }
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
   }
 
   const CONTROLS = [
@@ -712,10 +679,9 @@ void main(){
     options = options || {};
     const api = scope(element, CONTROLS, options);
     const cardOpt = options.card || null,
-      live = !!(cardOpt && cardOpt.interactive),
-      text = !cardOpt || !!cardOpt.text;
+      text = !!cardOpt.text;
     element.classList.add('tr-stage');
-    if (cardOpt) element.dataset.card = live ? 'live' : 'auto';
+    element.dataset.card = 'live';
     element.innerHTML =
       '<div class="tr-site ck-panel" data-size="lg"><div class="tr-view">' +
       pagesHTML(text) +
@@ -726,22 +692,19 @@ void main(){
           '<button type="button" class="ck-pill" data-size="sm" data-go="' +
           i +
           '"' +
-          (cardOpt && !live ? ' tabindex="-1"' : '') +
+          '' +
           (i ? '' : ' aria-current="page"') +
           '><i class="ck-dot" data-accent></i>' +
           w +
           '</button>',
       ).join('') +
       '</nav></div>' +
-      (cardOpt
-        ? ''
-        : '<p class="cr-hint" data-cr-chrome>Use the bottom nav to switch pages</p><div class="tr-hand" aria-hidden="true"></div>') +
+      '' +
       '<p class="cr-sr tr-live" aria-live="polite"></p>';
     const view = element.querySelector('.tr-view'),
       pages = [...element.querySelectorAll('.tr-page')],
       pills = [...element.querySelectorAll('.tr-nav .ck-pill')],
-      live_ = element.querySelector('.tr-live'),
-      hand = element.querySelector('.tr-hand');
+      live_ = element.querySelector('.tr-live');
     let canvas = element.querySelector('.tr-sheet');
     function glPainter(target) {
       const g = target.getContext('webgl', {
@@ -1023,8 +986,7 @@ void main(){
     }
     pills.forEach((btn, i) =>
       api.listen(btn, 'click', () => {
-        if (api.paused || (cardOpt && !live)) return;
-        takeOver();
+        if (api.paused || false) return;
         if (go(i) && cardOpt && cardOpt.touched) cardOpt.touched();
       }),
     );
@@ -1052,76 +1014,9 @@ void main(){
       if (painter) painter.free();
       painter = null;
     });
-    const L = 6;
-    let cyc = -1,
-      aim = 1,
-      fired = false,
-      handOff = false,
-      downWas = false;
-    const at = (el) => {
-      const s = element.getBoundingClientRect(),
-        r = el.getBoundingClientRect();
-      return { x: r.left - s.left + r.width * 0.5, y: r.top - s.top + r.height * 0.55 };
-    };
-    function takeOver() {
-      if (!live || handOff) return;
-      handOff = true;
-      if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-    }
-    function handAt(time) {
-      const c = Math.floor(time / L),
-        tt = time % L;
-      if (c !== cyc) {
-        cyc = c;
-        fired = false;
-        if (c === 0) settleIdle(0);
-        aim = (target + 1) % NAV.length;
-      }
-      const s = element.getBoundingClientRect(),
-        site = element.querySelector('.tr-site').getBoundingClientRect(),
-        rest = { x: site.right - s.left - site.width * 0.14, y: site.top - s.top + site.height * 0.58 },
-        pill = at(pills[aim]);
-      const pts = [
-        [0, rest],
-        [0.35, rest],
-        [1.0, pill],
-        [1.3, pill],
-        [2.1, rest],
-        [L, rest],
-      ];
-      let a = pts[0],
-        b = pts[1];
-      for (let i = 0; i < pts.length - 1; i++)
-        if (tt >= pts[i][0] && tt <= pts[i + 1][0]) {
-          a = pts[i];
-          b = pts[i + 1];
-          break;
-        }
-      const u = b[0] === a[0] ? 1 : R.smooth((tt - a[0]) / (b[0] - a[0])),
-        x = R.mix(a[1].x, b[1].x, u),
-        y = R.mix(a[1].y, b[1].y, u);
-      let o = c === 0 ? R.smooth(tt / 0.3) : 1;
-      if (cardOpt && cardOpt.once && tt > L - 0.6) o = Math.min(o, R.smooth((L - tt) / 0.5));
-      const down = tt >= 1.05 && tt < 1.2;
-      if (tt >= 1.1 && !fired) {
-        fired = true;
-        go(aim);
-      }
-      if (cardOpt) {
-        if (cardOpt.pointer) cardOpt.pointer({ x, y, opacity: o, down });
-      } else if (hand) {
-        hand.style.opacity = o.toFixed(3);
-        hand.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
-        if (down !== downWas) {
-          downWas = down;
-          hand.classList.toggle('is-down', down);
-        }
-      }
-    }
-    if (live) {
-      api.listen(element, 'pointerdown', () => takeOver());
+    let cyc = -1;
+    {
       api.restore = () => {
-        takeOver();
         if (restoring || (phase === 'idle' && page === 0 && target === 0)) return;
         if (api.reduced) {
           settleIdle(0);
@@ -1154,16 +1049,11 @@ void main(){
     }
     api.frame(({ dt, time, reduced }) => {
       if (reduced) {
-        if (cardOpt && cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false });
-        if (hand) hand.style.opacity = '0';
         return false;
       }
-      const handing = options.preview && !(live && (handOff || (cardOpt.once && time >= L)));
-      if (live && !handOff && cardOpt.once && time >= L) takeOver();
-      if (handing) handAt(time);
       if (restoring) stepRestore(dt);
       else step(dt);
-      return handing || phase !== 'idle' || !!restoring;
+      return phase !== 'idle' || !!restoring;
     });
     settleIdle(0);
     const status = api.status;
@@ -1184,39 +1074,6 @@ void main(){
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1252,8 +1109,7 @@ void main(){
     element.innerHTML = '<div class="fx-board" data-tr-board></div>';
     const panelZone = () => ({ right: 0, bottom: 0 });
     const stage = element,
-      board = stage.querySelector('[data-tr-board]'),
-      cursor = createCursor(stage);
+      board = stage.querySelector('[data-tr-board]');
     const phone = matchMedia('(max-width: 760px)');
     function place() {
       const W = stage.clientWidth,
@@ -1285,14 +1141,12 @@ void main(){
 
     const inst = mount(board, {
       params: options.params,
-      preview: true,
       fallback: !!options.fallback,
-      card: { text: true, interactive: true, once: true, pointer: cursor.set },
+      card: { text: true, interactive: true },
     });
 
     inst.on('destroy', () => {
       observer0.disconnect();
-      cursor.destroy();
     });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {

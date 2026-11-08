@@ -29,9 +29,6 @@
  *   each fade appearing only when there is more to scroll that way. A custom bar on the right (4 px wide, 7.25em tall)
  *   shows a thumb sized to the visible share (at least 16%). Drag the thumb or press anywhere on the bar to jump; wheel
  *   over the bar scrolls the list.
- * - Demo, once on load (8 s): a fake cursor opens Index at 1.1 s, runs over rows 2 to 4, drags the thumb to bring row 10
- *   into the middle (4.1 to 5 s), picks it, closes the menu at 6.8 s and leaves. Any real pointer move, press, key or
- *   wheel ends it for good.
  *
  * Options
  *   params.openHeight   260..440, default 360      open panel height in px
@@ -45,9 +42,9 @@
  *   fx.params                     copy of current params
  *   fx.setParams({stagger: 60})   change params live
  *   fx.setPaused(true|false)      freeze / resume
- *   fx.reset()                    params back to defaults, demo stopped, menu closed, third item current again
+ *   fx.reset()                    params back to defaults, menu closed, third item current again
  *   fx.setReducedMotion(bool)
- *   fx.destroy()                  removes listeners, observers and the fake cursor
+ *   fx.destroy()                  removes listeners, observers
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -81,9 +78,9 @@
  * - The menu is a nav landmark. The Index button carries aria-expanded; the list is aria-hidden while closed. Rows are
  *   buttons labelled "<name>, <kind>", the current one has aria-current. Arrow Up / Down move between rows, Escape
  *   closes and returns focus to Index, and a press outside the menu closes it. Keyboard focus shows the plate too.
- * - With reduced motion: no fake cursor, every transition is off, and the menu starts open so the
+ * - With reduced motion: every transition is off, and the menu starts open so the
  *   list is visible at once. It still opens, closes and scrolls, without animation.
- * - The loop only runs for the demo and stops when the tab is hidden, the element is off screen or it is paused.
+ *
  */
 (function (global) {
   'use strict';
@@ -103,7 +100,6 @@
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -121,8 +117,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -137,7 +154,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -163,13 +188,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -177,6 +210,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -206,8 +243,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -226,6 +266,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -242,6 +337,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -266,6 +365,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -275,6 +378,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -304,12 +409,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -342,149 +458,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'openHeight', type: 'range', default: 360, min: 260, max: 440, step: 10 },
     { key: 'rowDuration', type: 'range', default: 280, min: 150, max: 600, step: 10 },
@@ -493,7 +466,6 @@
   ];
 
   // ---- the effect ----
-  const CARD_LEAD = 1.9;
   const NAMES = [
     'Long Table',
     'Field Notes',
@@ -513,9 +485,6 @@
     'Lantern',
     'Half Light',
     'Wide Open',
-  ];
-  const YEARS = [
-    2026, 2026, 2025, 2025, 2025, 2024, 2024, 2024, 2023, 2023, 2022, 2022, 2021, 2021, 2020, 2020, 2019, 2019,
   ];
   const KINDS = [
     'Identity',
@@ -544,8 +513,8 @@
     const api = scope(element, CONTROLS, options);
     element.classList.add('dock-stage');
     const card = options.card || null,
-      catalog = (card && options.catalog) || null,
-      first = catalog ? (catalog.current != null ? +catalog.current : -1) : card ? -1 : 0,
+      catalog = options.catalog || null,
+      first = catalog ? (catalog.current != null ? +catalog.current : -1) : -1,
       chev =
         '<svg class="dock-chev" viewBox="0 0 17 10" aria-hidden="true"><path d="M1.5 1.5 8.5 8.5 15.5 1.5"/></svg>';
     const cardRow = (name, i) =>
@@ -572,47 +541,18 @@
           '</span><span class="dock-yr-mask"><span class="dock-yr" aria-hidden="true">' +
           (card.mark ? card.mark(i) : '') +
           '</span></span></span></button></li>';
-    if (card)
-      element.innerHTML =
-        '<nav class="dock ck-text" data-card' +
-        (catalog ? ' data-catalog' : '') +
-        ' aria-label="Sample navigation"><div class="dock-bg ck-panel" aria-hidden="true"></div><div class="dock-row"><span class="dock-logo" aria-hidden="true"><i class="ck-dot"></i><i class="ck-dot"></i></span>' +
-        '<button type="button" class="dock-link dock-toggle ck-text" data-strong tabindex="-1" aria-expanded="false"><span class="dock-label"><span class="dock-word">Index</span><span class="dock-count ck-num" aria-hidden="true">' +
-        NAMES.length +
-        '</span></span>' +
-        chev +
-        '</button></div>' +
-        '<div class="dock-drop" aria-hidden="true"><div class="dock-scroller"><ul class="dock-list">' +
-        NAMES.map(cardRow).join('') +
-        '</ul></div><div class="dock-bar"><i class="dock-thumb"></i></div></div></nav>';
-    else {
-      const rows = NAMES.map(
-        (name, i) =>
-          '<li><button type="button" class="dock-item" data-i="' +
-          i +
-          '" style="--n:' +
-          i +
-          '"><span class="dock-fill" aria-hidden="true"></span><span class="dock-inner"><span class="dock-name">' +
-          name +
-          '</span><span class="dock-yr-mask"><span class="dock-yr">' +
-          YEARS[i] +
-          '</span></span></span></button></li>',
-      ).join('');
-      element.innerHTML =
-        '<div class="dock-page" aria-hidden="true"><div class="dock-disc"><i></i></div></div><div class="dock-dim" aria-hidden="true"></div>' +
-        '<nav class="dock" aria-label="Sample navigation"><div class="dock-bg" aria-hidden="true"></div><div class="dock-row"><span class="dock-logo" aria-hidden="true"><i></i><i></i></span><a class="dock-link is-current" href="#" aria-current="page">Work<i class="dock-dot"></i></a><a class="dock-link" href="#">Notes</a>' +
-        '<button type="button" class="dock-link dock-toggle" aria-expanded="false" aria-controls="dock-drop-' +
-        id +
-        '"><span class="dock-label"><span class="dock-word">Index</span><span class="dock-count" aria-hidden="true">' +
-        NAMES.length +
-        '</span></span><svg class="dock-chev" viewBox="0 0 17 10" aria-hidden="true"><path d="M1.5 1.5 8.5 8.5 15.5 1.5"/></svg></button></div>' +
-        '<div class="dock-drop" id="dock-drop-' +
-        id +
-        '" aria-hidden="true"><div class="dock-scroller"><ul class="dock-list">' +
-        rows +
-        '</ul></div><div class="dock-bar"><i class="dock-thumb"></i></div></div></nav>' +
-        '<p class="cr-hint" data-cr-chrome>Click Index to open · Hover rows · Drag the bar to scroll · Esc to close</p><p class="cr-sr dock-live" aria-live="polite"></p><div class="dock-hand" aria-hidden="true"></div>';
-    }
+    element.innerHTML =
+      '<nav class="dock ck-text" data-card' +
+      (catalog ? ' data-catalog' : '') +
+      ' aria-label="Sample navigation"><div class="dock-bg ck-panel" aria-hidden="true"></div><div class="dock-row"><span class="dock-logo" aria-hidden="true"><i class="ck-dot"></i><i class="ck-dot"></i></span>' +
+      '<button type="button" class="dock-link dock-toggle ck-text" data-strong tabindex="-1" aria-expanded="false"><span class="dock-label"><span class="dock-word">Index</span><span class="dock-count ck-num" aria-hidden="true">' +
+      NAMES.length +
+      '</span></span>' +
+      chev +
+      '</button></div>' +
+      '<div class="dock-drop" aria-hidden="true"><div class="dock-scroller"><ul class="dock-list">' +
+      NAMES.map(cardRow).join('') +
+      '</ul></div><div class="dock-bar"><i class="dock-thumb"></i></div></div></nav>';
     const $ = (s) => element.querySelector(s),
       dock = $('.dock'),
       row = $('.dock-row'),
@@ -624,42 +564,35 @@
       scroller = $('.dock-scroller'),
       bar = $('.dock-bar'),
       thumb = $('.dock-thumb'),
-      live = $('.dock-live') || {},
-      hand = $('.dock-hand');
+      live = $('.dock-live') || {};
     const items = [...element.querySelectorAll('.dock-item')];
     let open = false,
       active = first,
       hot = -1,
       drag = null,
-      previewCycle = -1,
       closedW = 0,
-      widths = { word: 0, count: 0 },
-      handDown = false,
-      previewHot = -1;
-    const playable = !!(card && card.interactive),
-      cardLead = card && card.lead != null ? +card.lead : CARD_LEAD;
-    let handOff = false,
-      rewind = 0,
+      widths = { word: 0, count: 0 };
+    let rewind = 0,
       stillOpen = false;
     const fontPx = () => parseFloat(getComputedStyle(dock).fontSize) || 15;
     function measure() {
       closedW = row.scrollWidth + fontPx();
       widths.word = word.scrollWidth;
-      widths.count = card ? widths.word : count.scrollWidth;
+      widths.count = widths.word;
       const wOpen = Math.max(closedW + fontPx() * 4, fontPx() * 22);
       dock.style.setProperty('--w', closedW + 'px');
-      dock.style.setProperty('--w-open', (card ? Math.min(element.clientWidth, wOpen) : wOpen) + 'px');
-      if (card) dock.style.setProperty('--oh', element.clientHeight + 'px');
-      if (card && card.height) dock.style.setProperty('--oh', api.params.openHeight + 'px');
+      dock.style.setProperty('--w-open', Math.min(element.clientWidth, wOpen) + 'px');
+      dock.style.setProperty('--oh', element.clientHeight + 'px');
+      if (card.height) dock.style.setProperty('--oh', api.params.openHeight + 'px');
       label.style.width = (open ? widths.count : widths.word) + 'px';
       sync();
     }
     function apply() {
       const p = api.params;
-      dock.style.setProperty('--oh', card ? element.clientHeight + 'px' : p.openHeight / 15 + 'em');
+      dock.style.setProperty('--oh', element.clientHeight + 'px');
       element.style.setProperty('--row', p.rowDuration + 'ms');
       element.style.setProperty('--stagger', p.stagger + 'ms');
-      if (card && card.height) dock.style.setProperty('--oh', p.openHeight + 'px');
+      if (card.height) dock.style.setProperty('--oh', p.openHeight + 'px');
       element.style.setProperty('--dock-ease', p.curve === 'classic' ? CLASSIC_EASE : 'var(--out)');
       sync();
     }
@@ -695,7 +628,7 @@
         setHot(-1);
       }
       if (announce) live.textContent = open ? 'Index open, ' + NAMES.length + ' items.' : 'Index closed.';
-      if (announce && playable && card.touched) card.touched();
+      if (announce && true && card.touched) card.touched();
     }
     function scaleOf(el) {
       const m = getComputedStyle(el).transform;
@@ -836,7 +769,6 @@
     api.on('resize', measure);
     api.on('replay', () => {
       reset();
-      previewCycle = -1;
     });
     api.on('pause', (v) => {
       if (v) endDrag();
@@ -845,25 +777,12 @@
       document.fonts.ready.then(() => {
         if (!api.destroyed) measure();
       });
-    function takeOver(e) {
-      if (handOff) return;
-      handOff = true;
-      if (card.pointer) card.pointer({ x: 0, y: 0, opacity: 0, down: false });
-      if (!drag) thumb.classList.remove('is-dragging');
-      previewHot = -1;
-      const real = open && e && e.pointerType === 'mouse' ? items.findIndex((item) => item.matches(':hover')) : -1;
-      if (real !== hot) {
-        setHot(-1);
-        if (real >= 0) setHot(real, true);
-      }
-      tidy();
-    }
     function tidy() {
       items.forEach((item, n) => {
         if (n !== hot) item.classList.remove('is-hot');
       });
     }
-    if (playable) {
+    {
       const touch = () => {
         if (card.touched) card.touched();
       };
@@ -872,13 +791,6 @@
       items.forEach((item) =>
         ['pointerenter', 'pointerleave', 'focus', 'blur'].forEach((type) => api.listen(item, type, tidy)),
       );
-      api.listen(element, 'pointermove', (e) => {
-        if (e.pointerType === 'mouse' && !handOff && !e.movementX && !e.movementY) return;
-        takeOver(e);
-      });
-      api.listen(element, 'pointerdown', (e) => takeOver(e));
-      api.listen(element, 'keydown', () => takeOver());
-      api.listen(dock, 'wheel', () => takeOver(), { passive: true });
       items.forEach((item) =>
         api.listen(item, 'click', () => {
           if (!api.paused) touch();
@@ -912,7 +824,6 @@
       });
       api.on('destroy', () => clearTimeout(rewind));
       api.restore = () => {
-        takeOver();
         clearTimeout(rewind);
         const was = open;
         endDrag();
@@ -942,140 +853,19 @@
         else toTop();
       };
     }
-    const center = (el, fx = 0.5, fy = 0.5) => {
-      const s = element.getBoundingClientRect(),
-        r = el.getBoundingClientRect();
-      return { x: r.left - s.left + r.width * fx, y: r.top - s.top + r.height * fy };
-    };
-    const pickScroll = (max) =>
-      R.clamp(items[9].offsetTop + items[9].offsetHeight / 2 - scroller.clientHeight / 2, 0, max);
-    function thumbEnd() {
-      const s = sync(),
-        b = center(bar, 0.5, 0);
-      return { x: b.x, y: b.y + (s.max > 0 ? (s.travel * pickScroll(s.max)) / s.max : 0) + s.th / 2 };
-    }
-    function path(t) {
-      const s = element.getBoundingClientRect(),
-        rest = { x: s.width * 0.74, y: s.height * 0.86 },
-        tg = center(toggle, 0.45, 0.6),
-        r = (n) => center(items[n], 0.35, 0.55),
-        th = center(thumb, 0.5, 0.5),
-        bt = card ? thumbEnd() : center(bar, 0.5, 0.82);
-      const pts = [
-        [0, rest, 0],
-        [card ? 0.3 : 0.35, rest, 0],
-        [0.6, rest, 1],
-        [1.05, tg, 1],
-        [1.25, tg, 1],
-        [1.85, r(1), 1],
-        [2.25, r(1), 1],
-        [2.55, r(2), 1],
-        [2.85, r(2), 1],
-        [3.15, r(3), 1],
-        [3.45, r(3), 1],
-        [3.9, th, 1],
-        [4.1, th, 1],
-        [5.0, bt, 1],
-        [5.2, bt, 1],
-        [5.65, r(9), 1],
-        [5.95, r(9), 1],
-        [6.45, tg, 1],
-        [6.75, tg, 1],
-        [7.3, rest, 1],
-        [7.65, rest, 0],
-        [8, rest, 0],
-      ];
-      let a = pts[0],
-        b = pts[0];
-      for (let i = 0; i < pts.length - 1; i++) {
-        if (t >= pts[i][0] && t <= pts[i + 1][0]) {
-          a = pts[i];
-          b = pts[i + 1];
-          break;
-        }
-      }
-      const u = b[0] === a[0] ? 1 : R.smooth((t - a[0]) / (b[0] - a[0]));
-      return { x: R.mix(a[1].x, b[1].x, u), y: R.mix(a[1].y, b[1].y, u), o: R.mix(a[2], b[2], u) };
-    }
-    let fired = {};
-    function once(key, t, at, fn) {
-      if (t >= at && !fired[key]) {
-        fired[key] = true;
-        fn();
-      }
-    }
     api.frame(({ time, reduced }) => {
-      if (playable && reduced) {
+      if (reduced) {
         if (!stillOpen) {
           stillOpen = true;
           setOpen(true, false);
         }
         return false;
       }
-      if (card && reduced) {
+      if (reduced) {
         if (!open) setOpen(true, false);
         return false;
       }
-      if (!options.preview || reduced) return false;
-      if (playable && !handOff && card.once && time + cardLead >= 8) takeOver();
-      if (playable && handOff) return false;
-      const lead = card ? cardLead : 0,
-        c = Math.floor((time + lead) / 8),
-        t = (time + lead) % 8;
-      let snap = false;
-      if (c !== previewCycle) {
-        if (card && previewCycle < 0) {
-          snap = true;
-          element.dataset.reduced = 'true';
-        }
-        previewCycle = c;
-        fired = {};
-        reset();
-      }
-      if (t >= 4.1 && t < 5.0) {
-        const s = sync();
-        scroller.scrollTop = card
-          ? R.smooth((t - 4.1) / 0.9) * pickScroll(s.max)
-          : R.smooth((t - 4.1) / 0.9) * s.max * 0.78;
-        sync();
-      }
-      const h = path(t);
-      if (!card) {
-        hand.style.opacity = h.o.toFixed(3);
-        hand.style.transform = 'translate3d(' + h.x.toFixed(1) + 'px,' + h.y.toFixed(1) + 'px,0)';
-      }
-      const down = (t >= 1.05 && t < 1.2) || (t >= 4.0 && t < 5.05) || (t >= 5.95 && t < 6.1) || (t >= 6.75 && t < 6.9);
-      if (card) {
-        if (card.pointer) card.pointer({ x: h.x, y: h.y, opacity: h.o * R.clamp(time / 0.4, 0, 1), down });
-      } else if (down !== handDown) {
-        handDown = down;
-        hand.classList.toggle('is-down', down);
-      }
-      thumb.classList.toggle('is-dragging', t >= 4.0 && t < 5.05);
-      once('open', t, 1.12, () => setOpen(true, false));
-      once('pick', t, 5.98, () => setActive(9));
-      once('close', t, 6.78, () => setOpen(false, false));
-      let over = -1;
-      if (open && t > 1.6 && t < 6.3 && !(t > 3.7 && t < 5.3)) {
-        const sr = element.getBoundingClientRect();
-        items.forEach((item, n) => {
-          const r = item.getBoundingClientRect(),
-            x = h.x + sr.left,
-            y = h.y + sr.top;
-          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) over = n;
-        });
-      }
-      if (over !== previewHot) {
-        const prev = previewHot;
-        previewHot = over;
-        setHot(over, prev < 0 || over < prev);
-        if (over < 0) hot = -1;
-      }
-      if (snap) {
-        void element.offsetHeight;
-        element.dataset.reduced = String(api.reduced);
-      }
-      return true;
+      return false;
     });
     if (first >= 0 && items[first]) {
       items[first].classList.add('is-active');
@@ -1108,39 +898,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -1175,24 +932,17 @@
     element.classList.add('dock-menu-dropdown');
     element.innerHTML = '<div class="fx-board" data-dock></div>';
     const stage = element,
-      board = stage.querySelector('[data-dock]'),
-      cursor = createCursor(stage, { inertia: false });
+      board = stage.querySelector('[data-dock]');
     const inst = mount(board, {
       params: options.params,
-      preview: true,
       catalog: { current: 2 },
       card: {
         lead: 0,
         height: true,
         interactive: true,
-        once: true,
-        pointer: cursor.set,
       },
     });
 
-    inst.on('destroy', () => {
-      cursor.destroy();
-    });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {
       get params() {

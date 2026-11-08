@@ -16,11 +16,8 @@
  *   floor(time since lit / frameInterval) mod 6. Moving to another row restarts that row at frame 0. Leaving the
  *   list unlights everything.
  * - Keyboard: every row is in the Tab order (tabindex 0). Keyboard focus lights the row exactly like hover; moving
- *   focus away puts it out. Focusing a row also ends the demo.
+ *   focus away puts it out.
  * - Touch, or any device where (hover: none) matches: a tap lights the tapped row, tapping it again unlights it.
- * - Demo, once on load: a fake cursor walks down the rows, 1.7 s per row, following the image slot of the lit row
- *   (aimed at 62% / 70% of the slot, exponential follow with a 110 ms time constant). After one pass through all rows
- *   it hides for good. A real pointer move (with actual movement) or any press ends it earlier.
  * - reset(): params back to defaults, every row unlit; row heights and slot sizes ease for 500 ms.
  *
  * Options
@@ -31,8 +28,8 @@
  *   const fx = mountStackedFrameIndex(element, {params: {...}});
  *   fx.params                           copy of current params
  *   fx.setParams({frameInterval: 300})  change params live
- *   fx.reset()                          defaults, demo stopped, rows unlit
- *   fx.destroy()                        stops the loop, removes listeners, observers and the fake cursor, empties the element
+ *   fx.reset()                          defaults, rows unlit
+ *   fx.destroy()                        stops the loop, removes listeners, observers, empties the element
  * There is no pause or reduced-motion setter; reduced motion follows the system setting (see below).
  *
  * Usage (plain HTML)
@@ -67,154 +64,11 @@
  * Accessibility and reduced motion
  * - Rows are focusable (tabindex 0) and light on keyboard focus the same way they light on hover; they have no role
  *   and no action, the frames are aria-hidden. If rows should lead somewhere, make them real links or buttons.
- * - With prefers-reduced-motion: no demo, no fake cursor; a lit row stays on frame 0 (the row still highlights).
+ * - With prefers-reduced-motion: a lit row stays on frame 0 (the row still highlights).
  * - The loop pauses while the tab is hidden.
  */
 (function (global) {
   'use strict';
-
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
 
   // ---- inlined from the shared card parts: a white card with a centred mark ----
   const GLYPHS = [
@@ -285,15 +139,12 @@
       { name: 'Renew', count: 8, order: ['name', 'image', 'count'] },
       { name: 'Detail', count: 12, order: ['image', 'name', 'count'] },
     ];
-    const PREVIEW_ROW_MS = 1700,
+    const ROW_CYCLE_MS = 1700,
       FRAME_COUNT = 6;
     function mountCard(el, cardOpt, options) {
       let values = { ...defaults, ...(options.params || {}) };
       let shown = [],
         rows = [];
-      const hand = { x: 0, y: 0, set: false };
-      let active = -1,
-        cycleStart = 0;
       function setFrame(r, index) {
         r.frames.forEach((f, i) => (f.style.opacity = i === index ? '1' : '0'));
       }
@@ -306,44 +157,29 @@
           frames: [...row.querySelectorAll('[data-slot]>*')],
         }));
         rows.forEach((r) => setFrame(r, 0));
-        if (cardOpt.interactive)
-          rows.forEach((r, i) => {
-            r.row.tabIndex = 0;
-            r.row.addEventListener('focus', () => {
-              if (!r.row.matches(':focus-visible')) return;
-              r.keyed = true;
-              takeOver();
-              light(i);
-            });
-            r.row.addEventListener('blur', () => {
-              if (r.keyed && lit === i) light(-1);
-              r.keyed = false;
-            });
+        rows.forEach((r, i) => {
+          r.row.tabIndex = 0;
+          r.row.addEventListener('focus', () => {
+            if (!r.row.matches(':focus-visible')) return;
+            r.keyed = true;
+            light(i);
           });
+          r.row.addEventListener('blur', () => {
+            if (r.keyed && lit === i) light(-1);
+            r.keyed = false;
+          });
+        });
       }
       build(cardOpt.count || 3);
-      function target(r) {
-        const a = el.getBoundingClientRect(),
-          b = r.slot.getBoundingClientRect();
-        return { x: b.left - a.left + b.width * 0.62, y: b.top - a.top + b.height * 0.7 };
-      }
-      const live = !!cardOpt.interactive,
-        zone = cardOpt.zone || el,
+      const zone = cardOpt.zone || el,
         offs = [];
-      const still = live && matchMedia('(prefers-reduced-motion: reduce)'),
-        noHover = live && matchMedia('(hover: none)');
-      let handOff = false,
-        clock = 0,
+      const still = matchMedia('(prefers-reduced-motion: reduce)'),
+        noHover = matchMedia('(hover: none)');
+      let clock = 0,
         lit = -1,
         litStart = 0,
         dirty = false,
         downType = '';
-      function takeOver() {
-        if (handOff) return;
-        handOff = true;
-        dirty = true;
-        cardOpt.pointer({ x: hand.x, y: hand.y, opacity: 0 });
-      }
       function paint() {
         dirty = false;
         rows.forEach((r, i) => {
@@ -367,11 +203,9 @@
         target.addEventListener(type, fn);
         offs.push(() => target.removeEventListener(type, fn));
       }
-      if (live) {
+      {
         el.style.setProperty('--index-scale', values.imageScale / 100);
         on(zone, 'pointermove', (e) => {
-          if (!handOff && e.pointerType === 'mouse' && !e.movementX && !e.movementY) return;
-          takeOver();
           if (!tapping(e.pointerType)) light(rowOf(e.target));
         });
         on(zone, 'pointerleave', (e) => {
@@ -379,7 +213,6 @@
         });
         on(zone, 'pointerdown', (e) => {
           downType = e.pointerType;
-          takeOver();
         });
         on(zone, 'click', (e) => {
           if (!tapping(downType)) return;
@@ -388,50 +221,20 @@
           if (lit >= 0 && cardOpt.touched) cardOpt.touched();
         });
       }
-      const control = cardOpt.loop((shown.length * PREVIEW_ROW_MS) / 1000, ({ t, dt, reduced, cycle }) => {
-        if (live) {
-          if (!handOff && (reduced || (cardOpt.once && cycle > 0))) takeOver();
+      const control = cardOpt.loop((shown.length * ROW_CYCLE_MS) / 1000, ({ t, dt, reduced, cycle }) => {
+        {
           clock += dt * 1000;
-          if (handOff) {
+          {
             if (lit >= 0 || dirty) paint();
             return;
           }
         }
-        const ms = t * 1000,
-          next = Math.floor(ms / PREVIEW_ROW_MS) % shown.length;
-        if (next !== active) {
-          active = next;
-          cycleStart = ms;
-          rows.forEach((r, i) => r.row.toggleAttribute('data-on', i === next));
-        }
-        rows.forEach((r, i) =>
-          setFrame(
-            r,
-            i === active && !reduced
-              ? Math.floor(Math.max(0, ms - cycleStart) / values.frameInterval) % FRAME_COUNT
-              : 0,
-          ),
-        );
-        const p = target(rows[active]);
-        if (!hand.set || reduced) {
-          hand.x = p.x;
-          hand.y = p.y;
-          hand.set = true;
-        } else {
-          const k = 1 - Math.exp((-dt * 1000) / 110);
-          hand.x += (p.x - hand.x) * k;
-          hand.y += (p.y - hand.y) * k;
-        }
-        cardOpt.pointer({ x: hand.x, y: hand.y, opacity: reduced ? 0 : 1 });
       });
       const api = {
         setParams(next) {
           values = { ...values, ...next };
         },
-        replay() {
-          active = -1;
-          hand.set = false;
-        },
+        replay() {},
         setPaused() {},
         destroy() {
           control.stop();
@@ -442,12 +245,11 @@
         if (n === shown.length) return;
         const keep = lit < n ? lit : -1;
         build(n);
-        active = -1;
         lit = -1;
         if (keep >= 0) light(keep);
-        else if (live) paint();
+        else paint();
       };
-      if (live) {
+      {
         const setParams = api.setParams,
           destroy = api.destroy;
         api.setParams = (next) => {
@@ -455,7 +257,6 @@
           el.style.setProperty('--index-scale', values.imageScale / 100);
         };
         api.restore = () => {
-          takeOver();
           lit = -1;
           paint();
         };
@@ -532,15 +333,6 @@
       mounted.timers.delete(t);
       global.clearTimeout(t);
     };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
-    };
     const watched = (Base) =>
       Base &&
       class extends Base {
@@ -577,7 +369,6 @@
     const listeners = new AbortController();
     const stage = element,
       board = stage.querySelector('[data-index-board]'),
-      cursor = createCursor(stage),
       still = matchMedia('(prefers-reduced-motion: reduce)');
     board.innerHTML = '<div class="ck-panel index-dir" data-size="lg"></div>';
     const dir = board.firstChild,
@@ -663,13 +454,7 @@
           return '<div class="ck-row">' + c.order.map((k) => parts[k]).join('') + '</div>';
         },
         interactive: true,
-        once: true,
         zone: board,
-        pointer: (s) => {
-          const a = stage.getBoundingClientRect(),
-            b = dir.getBoundingClientRect();
-          cursor.set(Object.assign({}, s, { x: s.x + b.left - a.left, y: s.y + b.top - a.top }));
-        },
         loop,
       },
     });
@@ -697,7 +482,6 @@
         if (mounted.done) return;
         listeners.abort();
         observer0.disconnect();
-        cursor.destroy();
         if (inst) mounted.owned.add(inst);
         mounted.restore();
       },

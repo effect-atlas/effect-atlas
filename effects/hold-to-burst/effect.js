@@ -6,7 +6,7 @@
  * Press and hold an ink-metal hexagon: the stage darkens, the hexagon swells and trembles, then bursts with a white flash
  * into 600 small prisms that drift, regroup into the word BURST and get a passing highlight. Let go and every piece flies
  * back into the hexagon. Real 3D (Three.js); without WebGL a flat version (24 white triangles round an accent dot) takes
- * over. On load a demo cursor presses it once, then hands over.
+ * over.
  *
  * How it moves (3D version, default values)
  * - Geometry: a hexagon of circumradius 1.25 units cut into 24 triangles, each cut into 25 small triangular prisms
@@ -27,16 +27,13 @@
  * - Framing: the finished word (8.3 x 3.2 units) fits the element with 20 px to spare, centred; it never comes closer than
  *   the full-screen framing. When the element is 760 px wide or narrower, the resting hexagon is enlarged to about 60 % of
  *   the width and the camera pulls back further while the word forms, so the word still fits.
- * - Demo cursor (once, 3D version): moves in from the lower right between 0.15 and 0.6 s, presses on the hexagon's lower
- *   right, holds until the word and highlight are done (about 4.85 s), lets go and fades out in 0.45 s. The first real
- *   press ends it for good.
  * - The word's shape is sampled from text drawn with "Arial Black" (fallback Arial, sans-serif), so it varies slightly
  *   with the fonts installed. Which piece goes to which point of the word is random per load.
  *
  * Flat version (no THREE, no WebGL, or the WebGL context is lost)
  * - 24 white SVG triangles over an accent dot, centred, fitted so the fully spread state stays inside the element with
  *   12 px to spare. Past holdSeconds the spread chases 1 at rate 5; on release the charge drains three times as fast as it
- *   built and the spread chases 0 at rate 4.4 / returnSeconds, so the pieces retrace their path. One 5 s demo loop.
+ *   built and the spread chases 0 at rate 4.4 / returnSeconds, so the pieces retrace their path.
  *
  * Input
  * - Press anywhere on the element (pointer, touch) or hold Space / Enter while it is focused (tabindex 0, role="button").
@@ -54,13 +51,13 @@
  *   const fx = mountHoldToBurst(element, {params: {...}, reducedMotion: null});
  *   fx.params                    copy of current params
  *   fx.setParams({spread: 3})    change params live
- *   fx.reset()                   params back to defaults; the demo stops, a press is let go, pieces return to the
+ *   fx.reset()                   params back to defaults; a press is let go, pieces return to the
  *                                hexagon in 0.5 s
  *   fx.setPaused(true|false)     flat version only; the 3D version pauses itself when the tab is hidden or the element is
  *                                off screen
  *   fx.setReducedMotion(bool)    flat version only; the 3D version follows prefers-reduced-motion
  *   fx.destroy()                 stops the loop, removes listeners and observers, releases the WebGL renderer, geometry,
- *                                textures and materials, removes the demo cursor
+ *                                textures and materials, removes
  *
  * Usage (plain HTML)
  *   <link rel="stylesheet" href="effect.css">
@@ -94,7 +91,7 @@
  * Accessibility and reduced motion
  * - The element is role="button" with an aria-label explaining hold / release; the canvas and flash are aria-hidden.
  *   Phases are not announced.
- * - Reduced motion, 3D version: no loop and no demo cursor; it rests on the finished word, and a click, Space or Enter
+ * - Reduced motion, 3D version: no loop and ; it rests on the finished word, and a click, Space or Enter
  *   toggles between the word and the hexagon. Flat version: it rests spread out and a click or key toggles closed /
  *   spread.
  *
@@ -120,7 +117,6 @@
   // listener and observer it added.
   function scope(element, controls, options) {
     options = options || {};
-    element.dataset.preview = String(options.preview === true);
     const defaults = Object.fromEntries(controls.map((control) => [control.key, control.default]));
     let params = Object.assign({}, defaults, options.params || {});
     let paused = false,
@@ -138,8 +134,29 @@
       active = true;
     const cleanup = [],
       hooks = new Map();
+    // Only card wrappers that supply a startup coordinator opt into deferred preparation.
+    // Keep mount synchronous, but prevent font/resize/replay callbacks from drawing an incomplete renderer.
+    const startup = options.card && options.card.startup;
+    let preparing = !!startup,
+      preparationRevision = 0,
+      preparationState = preparing ? 'pending' : 'legacy';
+    let resolveReady,
+      rejectReady,
+      preparationError = null,
+      preparationStarted = false;
+    const abortError = () =>
+      (startup && startup.signal.aborted && startup.signal.reason) ||
+      new DOMException('Effect preparation was cancelled', 'AbortError');
+    const ready = preparing
+      ? new Promise((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        })
+      : null;
+    if (ready) ready.catch(() => {});
     const preference = matchMedia('(prefers-reduced-motion: reduce)');
-    const reduced = () => (reducedOverride === null ? preference.matches : reducedOverride);
+    let preferenceReduced = preference.matches;
+    const reduced = () => (reducedOverride === null ? preferenceReduced : reducedOverride);
     const emit = (type, value) => {
       (hooks.get(type) || []).forEach((fn) => fn(value));
     };
@@ -154,7 +171,15 @@
       last = 0;
     }
     function allowed() {
-      return !destroyed && !paused && visible && !document.hidden && !reduced();
+      return (
+        !destroyed &&
+        !preparing &&
+        preparationState !== 'failed' &&
+        !paused &&
+        visible &&
+        !document.hidden &&
+        !reduced()
+      );
     }
     function tick(now) {
       raf = 0;
@@ -180,13 +205,21 @@
       }
     }
     function paint() {
-      if (destroyed) return;
+      if (destroyed || preparing || preparationState === 'failed') return;
       active = draw({ dt: 0, time, width, height, params, reduced: reduced() }) !== false;
     }
     function measure() {
       if (destroyed) return;
-      width = Math.max(1, element.clientWidth);
-      height = Math.max(1, element.clientHeight);
+      const nextWidth = Math.max(1, element.clientWidth),
+        nextHeight = Math.max(1, element.clientHeight);
+      if (preparing) {
+        if (width !== nextWidth || height !== nextHeight) preparationRevision++;
+        width = nextWidth;
+        height = nextHeight;
+        return;
+      }
+      width = nextWidth;
+      height = nextHeight;
       emit('resize', { width, height });
       paint();
       if (active) wake();
@@ -194,6 +227,10 @@
     function syncMotion() {
       stop();
       element.dataset.reduced = String(reduced());
+      if (preparing) {
+        preparationRevision++;
+        return;
+      }
       emit('motion', reduced());
       paint();
       if (active) wake();
@@ -223,8 +260,11 @@
       get destroyed() {
         return destroyed;
       },
-      get preview() {
-        return options.preview === true;
+      get preparing() {
+        return preparing;
+      },
+      invalidatePreparation() {
+        if (preparing) preparationRevision++;
       },
       on(type, fn) {
         if (!hooks.has(type)) hooks.set(type, []);
@@ -243,6 +283,61 @@
       wake,
       paint,
       measure,
+      runPreparationPhase(fn, label) {
+        if (!startup) return Promise.resolve().then(fn);
+        if (destroyed || preparationError || startup.signal.aborted)
+          return Promise.reject(preparationError || abortError());
+        return startup.runPhase(() => {
+          if (destroyed || preparationError || startup.signal.aborted) throw preparationError || abortError();
+          return fn();
+        }, label);
+      },
+      prepare(task) {
+        if (!startup || preparationStarted) return ready;
+        preparationStarted = true;
+        // Params/replay/resize may change while a GPU compilation or font is pending. Re-run only the
+        // module's idempotent preparation work for the newest inputs, with its renderer resources reused.
+        (async () => {
+          while (preparing && !destroyed && !preparationError) {
+            measure();
+            const revision = preparationRevision;
+            await task((fn, label) => api.runPreparationPhase(fn, label));
+            const completed = await api.runPreparationPhase(() => {
+              measure();
+              if (revision !== preparationRevision) return false;
+              time = 0;
+              last = 0;
+              preparing = false;
+              try {
+                paint();
+              } catch (error) {
+                preparing = true;
+                throw error;
+              }
+              preparationState = 'ready';
+              element.dataset.preparation = 'ready';
+              resolveReady(api);
+              if (active) wake();
+              return true;
+            }, 'first-frame');
+            if (completed) break;
+          }
+        })().catch((error) => api.failPreparation(error));
+        return ready;
+      },
+      failPreparation(error) {
+        if (!startup || preparationState === 'ready' || preparationState === 'failed') return;
+        preparationError =
+          error instanceof Error || (error && error.name)
+            ? error
+            : new Error(String(error || 'Effect preparation failed'));
+        preparationState = 'failed';
+        preparing = false;
+        stop();
+        element.dataset.preparation = 'failed';
+        rejectReady(preparationError);
+        api.destroy();
+      },
       setParams(next) {
         if (destroyed) return;
         const updated = Object.assign({}, params);
@@ -259,6 +354,10 @@
           updated[control.key] = value;
         });
         params = updated;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('params', params);
         paint();
         if (active) wake();
@@ -283,6 +382,10 @@
         if (destroyed) return;
         stop();
         time = 0;
+        if (preparing) {
+          preparationRevision++;
+          return;
+        }
         emit('replay');
         paint();
         if (active) wake();
@@ -292,6 +395,8 @@
         api.replay();
       },
       destroy() {
+        if (destroyed) return;
+        if (preparing) api.failPreparation(abortError());
         if (destroyed) return;
         destroyed = true;
         stop();
@@ -321,12 +426,23 @@
           destroyed,
           visible,
           reduced: reduced(),
+          preparing,
+          preparation: preparationState,
           listeners: cleanup.length,
           params: Object.assign({}, params),
         };
       },
     };
-    listen(preference, 'change', syncMotion);
+    if (ready) {
+      api.ready = ready;
+      element.dataset.preparation = 'pending';
+      listen(startup.signal, 'abort', () => api.destroy());
+      if (startup.signal.aborted) Promise.resolve().then(() => api.destroy());
+    }
+    listen(preference, 'change', (event) => {
+      preferenceReduced = event.matches;
+      syncMotion();
+    });
     listen(document, 'visibilitychange', () => {
       stop();
       emit('visibility', !document.hidden);
@@ -359,149 +475,6 @@
     return api;
   }
 
-  // ---- inlined from the shared page helpers: the demo cursor (arrow, wheel and hold badges) ----
-  function createCursor(stage, options) {
-    options = options || {};
-    const ref = options.ref || stage;
-    const size = options.size || 30,
-      s = size / 24;
-    const inertia = options.inertia !== false;
-    const ARROW_D =
-      'M5 4.35c0-1.06 1.24-1.62 2.04-.93l11.14 9.62c.83.72.32 2.08-.78 2.08h-4.66c-.5 0-.97.22-1.3.6l-3.33 3.86c-.73.84-2.11.33-2.11-.78Z';
-    const TIP_X = 5,
-      TIP_Y = 3;
-    const el = document.createElement('div');
-    el.className = 'dc-cursor';
-    el.setAttribute('aria-hidden', 'true');
-    el.style.setProperty('--dc-size', size + 'px');
-    el.innerHTML =
-      '<svg class="dc-hold" viewBox="0 0 40 40"><circle class="dc-hold-bg" cx="20" cy="20" r="15"/><circle class="dc-hold-track" cx="20" cy="20" r="15"/><circle class="dc-hold-arc" cx="20" cy="20" r="15" pathLength="1"/></svg>' +
-      '<div class="dc-body">' +
-      '<svg class="dc-arrow" viewBox="0 0 24 24" style="width:' +
-      size +
-      'px;height:' +
-      size +
-      'px;left:' +
-      -TIP_X * s +
-      'px;top:' +
-      -TIP_Y * s +
-      'px;transform-origin:' +
-      TIP_X * s +
-      'px ' +
-      TIP_Y * s +
-      'px"><path d="' +
-      ARROW_D +
-      '"/></svg>' +
-      '<svg class="dc-wheel" viewBox="0 0 22 32"><rect class="dc-wheel-shell" x="1" y="1" width="20" height="30" rx="10"/><line class="dc-wheel-split" x1="11" y1="1.6" x2="11" y2="11"/><rect class="dc-wheel-roll" x="9.25" y="5" width="3.5" height="7" rx="1.75"/></svg>' +
-      '</div>';
-    stage.appendChild(el);
-    const arc = el.querySelector('.dc-hold-arc');
-    let ox = 0,
-      oy = 0,
-      dirty = true;
-    const ro = new ResizeObserver(() => {
-      dirty = true;
-    });
-    ro.observe(stage);
-    if (ref !== stage) ro.observe(ref);
-    function offset() {
-      if (!dirty) return;
-      dirty = false;
-      if (ref === stage) {
-        ox = oy = 0;
-        return;
-      }
-      const a = stage.getBoundingClientRect(),
-        b = ref.getBoundingClientRect();
-      ox = b.left - a.left;
-      oy = b.top - a.top;
-    }
-    const last = { x: 0, y: 0, opacity: 0, down: false, wheel: false, hold: null };
-    const pos = { x: 0, y: 0, vx: 0, vy: 0 };
-    let shown = 0,
-      raf = 0,
-      prevT = 0,
-      wasDown = false,
-      dead = false;
-    const W = 26,
-      Z = 0.82;
-    function place() {
-      el.style.transform = 'translate3d(' + (ox + pos.x).toFixed(2) + 'px,' + (oy + pos.y).toFixed(2) + 'px,0)';
-    }
-    function tick(now) {
-      raf = 0;
-      if (dead) return;
-      const dt = prevT ? Math.min(0.032, (now - prevT) / 1000) : 1 / 60;
-      prevT = now;
-      for (let i = 0; i < 2; i++) {
-        const h = dt / 2;
-        pos.vx += (W * W * (last.x - pos.x) - 2 * Z * W * pos.vx) * h;
-        pos.vy += (W * W * (last.y - pos.y) - 2 * Z * W * pos.vy) * h;
-        pos.x += pos.vx * h;
-        pos.y += pos.vy * h;
-      }
-      place();
-      if (Math.abs(last.x - pos.x) + Math.abs(last.y - pos.y) > 0.05 || Math.abs(pos.vx) + Math.abs(pos.vy) > 1)
-        raf = requestAnimationFrame(tick);
-      else {
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-        prevT = 0;
-      }
-    }
-    function ripple() {
-      const r = document.createElement('i');
-      r.className = 'dc-ripple';
-      el.appendChild(r);
-      r.addEventListener('animationend', () => r.remove(), { once: true });
-    }
-    function set(state) {
-      if (dead) return;
-      Object.assign(last, state);
-      offset();
-      const o = Math.max(0, Math.min(1, +last.opacity || 0));
-      el.style.opacity = o.toFixed(3);
-      const far = Math.hypot(last.x - pos.x, last.y - pos.y) > 400;
-      if (!inertia || shown === 0 || far) {
-        cancelAnimationFrame(raf);
-        raf = 0;
-        prevT = 0;
-        pos.x = last.x;
-        pos.y = last.y;
-        pos.vx = pos.vy = 0;
-        place();
-      } else if (!raf) raf = requestAnimationFrame(tick);
-      shown = o;
-      const down = !!last.down,
-        holding = last.hold != null && o > 0;
-      if (down && !wasDown && !holding && o > 0) ripple();
-      wasDown = down;
-      el.toggleAttribute('data-down', down);
-      el.toggleAttribute('data-hold', holding);
-      if (holding) arc.style.strokeDashoffset = (1 - Math.max(0, Math.min(1, +last.hold || 0))).toFixed(4);
-      el.toggleAttribute('data-hold-done', holding && +last.hold >= 1);
-      el.toggleAttribute('data-wheel', !!last.wheel && o > 0);
-      el.toggleAttribute('data-wheel-up', typeof last.wheel === 'number' && last.wheel < 0);
-    }
-    return {
-      el,
-      element: el,
-      set,
-      hide() {
-        set({ opacity: 0, down: false, wheel: false, hold: null });
-      },
-      destroy() {
-        if (dead) return;
-        dead = true;
-        cancelAnimationFrame(raf);
-        ro.disconnect();
-        el.remove();
-      },
-    };
-  }
-
   const CONTROLS = [
     { key: 'holdSeconds', type: 'range', default: 0.5, min: 0.3, max: 1.5, step: 0.1 },
     { key: 'spread', type: 'range', default: 2.2, min: 1.2, max: 3.6, step: 0.1 },
@@ -522,8 +495,6 @@
       B = 1.6,
       DREF = 7.6,
       TAN = Math.tan((19 * Math.PI) / 180);
-    const H_IN = 0.15,
-      H_PRESS = 0.6;
     function mount(el, opt) {
       opt = opt || {};
       const T = window.THREE;
@@ -833,9 +804,6 @@
       let zoomOut = 1,
         wasBack = false,
         t = 0,
-        user = false,
-        handOff = false,
-        demoHeld = false,
         userHeld = false,
         heldPointer = null,
         dirty = false,
@@ -844,7 +812,7 @@
         view = { x: 0, y: 0, s: 1 },
         W = 1,
         H = 1;
-      const held = () => userHeld || demoHeld;
+      const held = () => userHeld || false;
       function hoverPose(q, tb) {
         const Bg = q.B,
           e = ease(cl(tb / 0.83)),
@@ -1010,7 +978,7 @@
           if (!held()) {
             if (st.charge > 0) {
               burst(Math.max(0.12, st.charge));
-              if (handOff) {
+              {
                 dirty = true;
                 if (opt.touched) opt.touched();
               }
@@ -1046,49 +1014,6 @@
           }
         }
       }
-      function hand() {
-        if (handOff) {
-          return;
-        }
-        const d = t,
-          rel = H_PRESS + params.holdSeconds + DONE + 0.9,
-          r = (1.25 * view.s * DREF) / 7;
-        let x = view.x + 0.554 * r,
-          y = view.y + 0.32 * r,
-          o = 0,
-          down = false,
-          hold = null;
-        if (d < H_PRESS) {
-          const u = cl((d - H_IN) / (H_PRESS - H_IN)),
-            e = 1 - ease(u);
-          x += 36 * e;
-          y += 40 * e;
-          o = u * u * (3 - 2 * u);
-        } else if (d < rel) {
-          o = 1;
-          down = true;
-          hold = st.phase === 'charge' ? st.charge : 1;
-        } else {
-          const u = cl((d - rel) / 0.45),
-            e = ease(u);
-          x += 14 * e;
-          y += 16 * e;
-          o = 1 - u * u * (3 - 2 * u);
-          hold = 1;
-          if (u >= 1) {
-            stopHand();
-            return;
-          }
-        }
-        demoHeld = down;
-        if (opt.pointer) opt.pointer({ x, y, opacity: o, down, hold });
-      }
-      function stopHand() {
-        if (handOff) return;
-        handOff = true;
-        demoHeld = false;
-        if (opt.pointer) opt.pointer({ x: 0, y: 0, opacity: 0, down: false, hold: null });
-      }
       function still() {
         if (flat === 'word') {
           st.phase = 'open';
@@ -1115,10 +1040,9 @@
         const dt = Math.min(0.05, (now - last) / 1000);
         last = now;
         t += dt;
-        hand();
         step(dt);
         draw();
-        if (handOff && !held() && st.phase === 'idle' && st.charge === 0) return;
+        if (!held() && st.phase === 'idle' && st.charge === 0) return;
         wake();
       }
       function wake() {
@@ -1137,7 +1061,6 @@
         offs = [];
       function press(e) {
         if (reduced.matches) {
-          stopHand();
           flat = flat === 'word' ? 'hex' : 'word';
           if (flat === 'hex') {
             if (opt.touched) opt.touched();
@@ -1145,7 +1068,6 @@
           still();
           return;
         }
-        stopHand();
         userHeld = true;
         wake();
       }
@@ -1202,7 +1124,6 @@
       ro.observe(el);
       const onReduce = () => {
         if (reduced.matches) {
-          stopHand();
           userHeld = false;
           sleep();
           flat = 'word';
@@ -1234,11 +1155,9 @@
         R.dispose();
         canvas.remove();
         flashEl.remove();
-        if (opt.pointer) opt.pointer({ x: 0, y: 0, opacity: 0, down: false, hold: null });
       }
       fit();
       if (reduced.matches) {
-        handOff = true;
         still();
       } else {
         draw();
@@ -1253,7 +1172,6 @@
           }
         },
         restore() {
-          stopHand();
           userHeld = false;
           heldPointer = null;
           dirty = false;
@@ -1282,7 +1200,7 @@
           p: st.p,
           tb: st.tb,
           held: held(),
-          demo: !handOff,
+          demo: false,
           running: !!raf,
           renderer: 'webgl',
           pieces: TOTAL,
@@ -1290,7 +1208,6 @@
         }),
         pose(o) {
           Object.assign(st, o);
-          stopHand();
           sleep();
           draw();
         },
@@ -1319,27 +1236,16 @@
       cardCX = 0,
       cardCY = 0,
       cardDrawn = [];
-    if (cardOpt)
-      element.innerHTML =
-        '<div class="burst-core" aria-hidden="true">' +
-        (cardOpt.core ? cardOpt.core() : '') +
-        '</div>' +
-        (cardOpt.shards ? cardOpt.shards(24) : '');
-    else
-      element.innerHTML =
-        '<div class="burst-interaction"><div class="burst-board" aria-hidden="true"><svg class="burst-charge"><circle class="burst-charge-track" pathLength="1"/><circle class="burst-charge-ring" pathLength="1"/></svg><div class="burst-core"><span class="burst-core-dot"></span></div><svg class="burst-shards">' +
-        '<polygon class="burst-shard"/>'.repeat(24) +
-        '</svg></div><button class="burst-trigger" type="button" aria-describedby="burst-instruction" data-cr-chrome><span class="burst-button-label">Hold to burst</span><span class="burst-meter" aria-hidden="true"><i></i></span></button></div><p class="burst-instruction" id="burst-instruction" data-cr-chrome>Hold Space or touch, release to reassemble</p><span class="burst-state" aria-live="polite" data-cr-chrome>Press and hold</span><div class="burst-hand" aria-hidden="true"><svg viewBox="0 0 60 60"><circle class="burst-hand-track" cx="30" cy="30" r="26"/><circle class="burst-hand-ring" cx="30" cy="30" r="26" pathLength="1"/></svg><i></i></div>';
-    const interaction = element.querySelector('.burst-interaction'),
-      button = element.querySelector('button'),
-      meter = element.querySelector('.burst-meter i'),
-      state = element.querySelector('.burst-state'),
-      hand = element.querySelector('.burst-hand'),
-      handRing = element.querySelector('.burst-hand-ring');
-    const board = cardOpt ? element : element.querySelector('.burst-board'),
+    element.innerHTML =
+      '<div class="burst-core" aria-hidden="true">' +
+      (cardOpt.core ? cardOpt.core() : '') +
+      '</div>' +
+      (cardOpt.shards ? cardOpt.shards(24) : '');
+    const interaction = element.querySelector('.burst-interaction');
+    const board = element,
       chargeRing = element.querySelector('.burst-charge-ring'),
       chargeTrack = element.querySelector('.burst-charge-track'),
-      PAD = cardOpt ? 4 : 10;
+      PAD = 4;
     const facets = cardFacets();
     cardPieces = Array.from(board.querySelectorAll('polygon'));
     cardCore = board.querySelector('.burst-core');
@@ -1348,57 +1254,15 @@
       charge = 0,
       spread = 0,
       flatToggle = false,
-      lastPhase = '',
-      lastMetal = '';
+      lastPhase = '';
     api.on('resize', cardLayout);
     api.on('params', cardLayout);
-    function start(event) {
-      if (api.paused || api.reduced || api.destroyed || event.button > 0) return;
-      held = true;
-      if (event.pointerId != null) {
-        heldPointer = event.pointerId;
-        interaction.setPointerCapture(event.pointerId);
-      }
-      api.wake();
-    }
     function release() {
       held = false;
       if (heldPointer != null && interaction && interaction.hasPointerCapture(heldPointer))
         interaction.releasePointerCapture(heldPointer);
       heldPointer = null;
       api.wake();
-    }
-    if (!cardOpt) {
-      api.listen(interaction, 'pointerdown', start);
-      api.listen(interaction, 'pointerup', release);
-      api.listen(interaction, 'pointercancel', release);
-      api.listen(button, 'keydown', (event) => {
-        if (event.key === ' ' || event.key === 'Enter') {
-          event.preventDefault();
-          if (api.reduced) {
-            if (!event.repeat) {
-              flatToggle = !flatToggle;
-              api.paint();
-            }
-          } else if (!event.repeat) start(event);
-        }
-      });
-      api.listen(button, 'keyup', (event) => {
-        if (event.key === ' ' || event.key === 'Enter') {
-          event.preventDefault();
-          release();
-        }
-      });
-      api.listen(button, 'click', () => {
-        if (api.reduced) {
-          flatToggle = !flatToggle;
-          api.paint();
-        }
-      });
-      api.listen(window, 'blur', release);
-      api.on('visibility', (visible) => {
-        if (!visible) release();
-      });
     }
     api.on('pause', (paused) => {
       if (paused) release();
@@ -1409,15 +1273,14 @@
       flatToggle = false;
       lastPhase = '';
     });
-    if (cardOpt) {
+    {
       flatToggle = true;
       api.on('replay', () => {
         flatToggle = true;
       });
     }
     const RESTORE = 0.5;
-    let handOff = false,
-      back = null,
+    let back = null,
       dirty = false;
     function cubicBezier(x1, y1, x2, y2) {
       const at = (a, b, s) => {
@@ -1464,13 +1327,8 @@
         back = null;
       }
     }
-    if (cardOpt && cardOpt.interactive) {
-      const hide = () => {
-        if (!handOff) {
-          handOff = true;
-          if (cardOpt.pointer) cardOpt.pointer({ x: 0, y: 0, opacity: 0, down: false, hold: null });
-        }
-      };
+    {
+      const hide = () => {};
       const toggle = () => {
         flatToggle = !flatToggle;
         if (cardOpt.settled && flatToggle) cardOpt.settled();
@@ -1578,12 +1436,7 @@
         f = Math.sin(r[2]);
       return [c * e, -c * f, a * f + b * e * d, a * e - b * f * d];
     }
-    const CARD_CORE = (1.58 * Math.sqrt(3)) / 2,
-      C_LOOP = 5,
-      C_IN = 0.15,
-      C_PRESS = 0.6,
-      C_UP = 2.8,
-      C_OUT = 0.45;
+    const CARD_CORE = (1.58 * Math.sqrt(3)) / 2;
     const GL = {
       fov: 42,
       camZ: 6.08,
@@ -1603,7 +1456,7 @@
     };
     let gl = null,
       vib = 0;
-    if (cardOpt && cardOpt.gl && window.THREE) gl = glMake();
+    if (cardOpt.gl && window.THREE) gl = glMake();
     function glMake() {
       const T = window.THREE,
         canvas = document.createElement('canvas');
@@ -1813,7 +1666,7 @@
           });
         });
       cardUnit = Math.max(1, Math.min(w, h) / 2 - PAD) / extent;
-      if (cardOpt && cardOpt.layout) {
+      if (cardOpt.layout) {
         const f = cardOpt.layout(w, h);
         cardCX = f.x;
         cardCY = f.y;
@@ -1847,42 +1700,7 @@
       }
     }
     function cardPressing(time) {
-      if (cardOpt.interactive && (handOff || (cardOpt.once && time >= C_LOOP))) return held;
-      const t = time % C_LOOP;
-      return t >= C_PRESS && t < C_UP;
-    }
-    function cardHand(time, fraction, reduced) {
-      if (cardOpt.interactive && (handOff || (cardOpt.once && time >= C_LOOP))) {
-        handOff = true;
-        return { x: 0, y: 0, opacity: 0, down: false, hold: null };
-      }
-      if (reduced) return { x: 0, y: 0, opacity: 0, down: false, hold: null };
-      const t = time % C_LOOP,
-        r = 1.72 * cardUnit;
-      let x = cardCX + 0.554 * r,
-        y = cardCY + 0.32 * r,
-        o = 0,
-        down = false,
-        hold = null;
-      if (t < C_PRESS) {
-        const u = R.clamp((t - C_IN) / (C_PRESS - C_IN), 0, 1),
-          e = 1 - R.easeOut(u);
-        x += 36 * e;
-        y += 40 * e;
-        o = R.smooth(u);
-      } else if (t < C_UP) {
-        o = 1;
-        down = true;
-        hold = fraction;
-      } else {
-        const u = R.clamp((t - C_UP) / C_OUT, 0, 1),
-          e = R.easeOut(u);
-        x += 14 * e;
-        y += 16 * e;
-        o = 1 - R.smooth(u);
-        hold = fraction;
-      }
-      return { x, y, opacity: o, down, hold };
+      return held;
     }
     function cardDraw(time, fraction, params, reduced) {
       const shrink = squeeze(fraction, spread),
@@ -1920,10 +1738,9 @@
           cardDrawn.core = c;
         }
       }
-      if (cardOpt && cardOpt.pointer) cardOpt.pointer(cardHand(time, fraction, reduced));
     }
     api.frame(({ dt, time, params, reduced }) => {
-      const pressing = cardOpt ? cardPressing(time) : options.preview ? time % 7 > 1 && time % 7 < 3.8 : held;
+      const pressing = cardPressing(time);
       if (reduced) {
         spread = flatToggle ? 1 : 0;
         charge = flatToggle ? params.holdSeconds : 0;
@@ -1944,7 +1761,7 @@
         if (spread < 0.0003) spread = 0;
       }
       if (back) stepBack(dt);
-      if (held && cardOpt && cardOpt.interactive && cardOpt.touched && charge >= params.holdSeconds) {
+      if (held && cardOpt && true && cardOpt.touched && charge >= params.holdSeconds) {
         cardOpt.touched();
         dirty = true;
       }
@@ -1971,43 +1788,13 @@
       if (gl && gl.on) {
         lastPhase = phase;
         glDraw(fraction, params, reduced, dt);
-        if (cardOpt.pointer) cardOpt.pointer(cardHand(time, fraction, reduced));
         return !reduced;
       }
-      if (cardOpt) {
+      {
         lastPhase = phase;
         cardDraw(time, fraction, params, reduced);
-        return !(handOff && !held && !back && !spread && !charge);
+        return !(!held && !back && !spread && !charge);
       }
-      if (phase !== lastPhase) {
-        state.textContent = {
-          idle: 'Press and hold',
-          charging: 'Charging',
-          dispersing: 'Bursting',
-          expanded: 'Held open',
-          returning: 'Returning',
-        }[phase];
-        lastPhase = phase;
-      }
-      meter.style.transform = 'scaleX(' + fraction + ')';
-      chargeRing.style.strokeDashoffset = String(1 - fraction);
-      board.style.setProperty(
-        '--burst-ring',
-        reduced ? '0' : R.clamp((fraction > 0 ? 1 : 0) * (1 - spread * 1.6), 0, 1).toFixed(3),
-      );
-      if (params.metal !== lastMetal) {
-        lastMetal = params.metal;
-        board.style.setProperty('--burst-metal', params.metal);
-      }
-      if (options.preview) {
-        const t = time % 7,
-          show = reduced ? 0 : t < 0.6 ? R.smooth((t - 0.3) / 0.3) : t < 4.3 ? 1 : 1 - R.smooth((t - 4.3) / 0.4);
-        hand.style.opacity = show.toFixed(3);
-        hand.classList.toggle('is-down', pressing);
-        handRing.style.strokeDashoffset = String(1 - fraction);
-      }
-      cardDraw(time, fraction, params, reduced);
-      return true;
     });
     cardLayout();
     api.paint();
@@ -2060,14 +1847,11 @@
       };
       const m = mountFlat(element, {
         params: api.params,
-        preview: true,
         card: {
           interactive: true,
-          once: true,
           layout,
           shards,
           core: () => '<span class="ck-dot" data-size="lg" data-accent></span>',
-          pointer: options.pointer,
         },
       });
       if (api.paused) m.setPaused(true);
@@ -2076,7 +1860,6 @@
     engine =
       window.BurstWow &&
       window.BurstWow.mount(element, {
-        pointer: options.pointer,
         lost: () => {
           engine = flat();
         },
@@ -2107,39 +1890,6 @@
       observers: new Set(),
       owned: new Set(),
       done: false,
-    };
-    const requestAnimationFrame = (cb) => {
-      const f = global.requestAnimationFrame((t) => {
-        mounted.frames.delete(f);
-        cb(t);
-      });
-      mounted.frames.add(f);
-      return f;
-    };
-    const cancelAnimationFrame = (f) => {
-      mounted.frames.delete(f);
-      global.cancelAnimationFrame(f);
-    };
-    const setTimeout = (cb, ms, ...args) => {
-      const t = global.setTimeout(() => {
-        mounted.timers.delete(t);
-        cb(...args);
-      }, ms);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearTimeout = (t) => {
-      mounted.timers.delete(t);
-      global.clearTimeout(t);
-    };
-    const setInterval = (cb, ms, ...args) => {
-      const t = global.setInterval(cb, ms, ...args);
-      mounted.timers.add(t);
-      return t;
-    };
-    const clearInterval = (t) => {
-      mounted.timers.delete(t);
-      global.clearInterval(t);
     };
     const watched = (Base) =>
       Base &&
@@ -2174,12 +1924,8 @@
     element.classList.add('hold-to-burst');
     element.innerHTML =
       '<div class="fx-board" data-burst-board role="button" tabindex="0" aria-label="Hold to burst, release to reassemble. Space or Enter also works."></div>';
-    const board = element.querySelector('[data-burst-board]'),
-      cursor = createCursor(element);
-    const inst = mount(board, { params: options.params, pointer: cursor.set });
-    inst.on('destroy', () => {
-      cursor.destroy();
-    });
+    const board = element.querySelector('[data-burst-board]');
+    const inst = mount(board, { params: options.params });
     if (options.reducedMotion != null) inst.setReduced(options.reducedMotion);
     return {
       get params() {
