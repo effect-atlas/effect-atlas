@@ -11,3 +11,5 @@ desktop.ini
 # Leftovers if the whole export folder is ever copied in: backup folders (_name) and notes stay out
 effects/_*/
 effects/*.md
+!effects/README.md
+!effects/README.zh-CN.md
