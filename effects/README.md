@@ -4,7 +4,7 @@
 
 <!-- Generated from catalog.json by scripts/catalog.mjs. Edit the catalog, then run --write. -->
 
-46 effects. Each appears once under its primary category. Additional categories, mount functions and file dependencies are in [catalog.json](../catalog.json).
+50 effects. Each appears once under its primary category. Additional categories, mount functions and file dependencies are in [catalog.json](../catalog.json).
 
 [Cursor](#cursor) · [Hover](#hover) · [Text](#text) · [Menus](#nav) · [Scroll](#scroll) · [Hero](#hero) · [Transitions](#trans) · [Galleries](#gallery) · [Other](#other)
 
@@ -35,7 +35,7 @@
 
 <a id="text"></a>
 
-## Text (5)
+## Text (6)
 
 | Effect folder | What it does | Preview |
 | --- | --- | --- |
@@ -44,16 +44,18 @@
 | [Prismatic Fluid Headline](prismatic-fluid-headline/) | Sweep across an outlined headline and liquid colour swirls inside the letters, then fades. | [Live demo](https://effectatlas.com/effects/prismatic-fluid-headline) |
 | [Word-by-Word Reading Highlight](reading-word-highlight/) | Reveals text and sweeps highlights through an existing article as you scroll. | [Live demo](https://effectatlas.com/effects/reading-word-highlight) |
 | [Scroll Speed Scramble](scroll-speed-scramble/) | A headline that scrambles into letters the faster you scroll. | [Live demo](https://effectatlas.com/effects/scroll-speed-scramble) |
+| [Bouncing Text Entrance](scroll-story/) | Letters animate in when scrolled into view, then stay for you to read. | [Live demo](https://effectatlas.com/effects/scroll-story) |
 
 <a id="nav"></a>
 
-## Menus (7)
+## Menus (8)
 
 | Effect folder | What it does | Preview |
 | --- | --- | --- |
 | [Annotated Menu](annotated-menu/) | Hover a menu item and it gets struck through and rewritten by hand, like a marked-up proof. | [Live demo](https://effectatlas.com/effects/annotated-menu) |
 | [Curtain Menu](curtain-menu/) | A fullscreen menu with large type and live previews. | [Live demo](https://effectatlas.com/effects/curtain-menu) |
 | [Dock Menu Dropdown](dock-menu-dropdown/) | A compact nav that grows into a scrollable index. | [Live demo](https://effectatlas.com/effects/dock-menu-dropdown) |
+| [Elastic Menu](expanding-dock/) | Open Menu or Design to reveal the actions. Try a palette or a type style. | [Live demo](https://effectatlas.com/effects/expanding-dock) |
 | [Hairline Burger](hairline-burger/) | A two-line menu button that folds into a cross. | [Live demo](https://effectatlas.com/effects/hairline-burger) |
 | [Local Clock Pill](local-clock-pill/) | A local-time pill that rolls over to a contact link. | [Live demo](https://effectatlas.com/effects/local-clock-pill) |
 | [Rotating Tab Accordion](rotating-tab-accordion/) | A service directory with vertical tab labels that opens on hover, click or keyboard input. | [Live demo](https://effectatlas.com/effects/rotating-tab-accordion) |
@@ -98,13 +100,15 @@
 
 <a id="gallery"></a>
 
-## Galleries (6)
+## Galleries (8)
 
 | Effect folder | What it does | Preview |
 | --- | --- | --- |
 | [Curved Gallery](curved-gallery/) | A drag-to-spin gallery curved like a wall. | [Live demo](https://effectatlas.com/effects/curved-gallery) |
 | [Disc Carousel](disc-carousel/) | A tilted row of discs that turns one at a time. | [Live demo](https://effectatlas.com/effects/disc-carousel) |
 | [Edge Refraction Dispersion](edge-refraction-dispersion/) | Bends and separates colors along the edges of an existing content viewport. | [Live demo](https://effectatlas.com/effects/edge-refraction-dispersion) |
+| [Wave Gallery](exploration-gallery/) | Drag or scroll to explore. Select an item to keep it marked. | [Live demo](https://effectatlas.com/effects/exploration-gallery) |
+| [Stacked Card Carousel](focus-cascade/) | Move through the stack. Focus a card, then select it. | [Live demo](https://effectatlas.com/effects/focus-cascade) |
 | [Hanging Card Carousel](hanging-card-carousel/) | A row of hanging cards that swing when flung. | [Live demo](https://effectatlas.com/effects/hanging-card-carousel) |
 | [Horizontal Wheel Strip](horizontal-wheel-strip/) | A horizontal strip that glides with inertia. | [Live demo](https://effectatlas.com/effects/horizontal-wheel-strip) |
 | [Inertia Drag](inertia-drag/) | Tiles you can toss that glide, tilt, and settle. | [Live demo](https://effectatlas.com/effects/inertia-drag) |

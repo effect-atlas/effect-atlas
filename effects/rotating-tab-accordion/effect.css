@@ -2,6 +2,10 @@
   min-width: 0;
   color: var(--rta-ink, #20221f);
 }
+.rta-root .rta-object:not([data-layout-ready]),
+.rta-root .rta-object:not([data-layout-ready]) * {
+  transition: none !important;
+}
 .rta-root .rta-object {
   position: relative;
   width: 100%;

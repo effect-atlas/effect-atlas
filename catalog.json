@@ -300,6 +300,55 @@
       ]
     },
     {
+      "slug": "expanding-dock",
+      "name": "Elastic Menu",
+      "description": "Open Menu or Design to reveal the actions. Try a palette or a type style.",
+      "nameZh": "弹性展开菜单",
+      "descriptionZh": "点开操作栏，展开导航或设计选项；再次点击收回。",
+      "categories": [
+        "nav"
+      ],
+      "directory": "effects/expanding-dock",
+      "preview": "https://effectatlas.com/effects/expanding-dock",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountExpandingDock"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
+      "slug": "exploration-gallery",
+      "name": "Wave Gallery",
+      "description": "Drag or scroll to explore. Select an item to keep it marked.",
+      "nameZh": "波浪画廊",
+      "descriptionZh": "拖动或滚动浏览，点击一项可保留选择。",
+      "categories": [
+        "gallery",
+        "scroll"
+      ],
+      "directory": "effects/exploration-gallery",
+      "preview": "https://effectatlas.com/effects/exploration-gallery",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountExplorationGallery"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
       "slug": "film-jitter-hover",
       "name": "Film Jitter Button",
       "description": "A button that shakes like old film on hover.",
@@ -340,6 +389,30 @@
         "script": "effect.js",
         "styles": "effect.css",
         "mount": "mountFluidMaskHero"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
+      "slug": "focus-cascade",
+      "name": "Stacked Card Carousel",
+      "description": "Move through the stack. Focus a card, then select it.",
+      "nameZh": "叠卡轮播",
+      "descriptionZh": "拖动或点击两侧卡片切换，再点击当前卡片确认选择。",
+      "categories": [
+        "gallery"
+      ],
+      "directory": "effects/focus-cascade",
+      "preview": "https://effectatlas.com/effects/focus-cascade",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountFocusCascade"
       },
       "dependencies": [],
       "files": [
@@ -982,6 +1055,32 @@
         "script": "effect.js",
         "styles": "effect.css",
         "mount": "mountScrollSpeedScramble"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
+      "slug": "scroll-story",
+      "name": "Bouncing Text Entrance",
+      "description": "Letters animate in when scrolled into view, then stay for you to read.",
+      "nameZh": "弹跳文字入场",
+      "descriptionZh": "滚动触发文字入场，停止滚动也会播完，随后保持清晰可读。",
+      "categories": [
+        "text",
+        "scroll",
+        "hero"
+      ],
+      "directory": "effects/scroll-story",
+      "preview": "https://effectatlas.com/effects/scroll-story",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountScrollStory"
       },
       "dependencies": [],
       "files": [

@@ -4,7 +4,7 @@
 
 <!-- Generated from catalog.json by scripts/catalog.mjs. Edit the catalog, then run --write. -->
 
-共 46 个效果。每项在主分类下列出一次；完整的辅助分类、挂载函数和文件依赖见 [catalog.json](../catalog.json)。
+共 50 个效果。每项在主分类下列出一次；完整的辅助分类、挂载函数和文件依赖见 [catalog.json](../catalog.json)。
 
 [光标](#cursor) · [悬停](#hover) · [文字](#text) · [菜单](#nav) · [滚动](#scroll) · [首屏](#hero) · [转场](#trans) · [画廊](#gallery) · [其他](#other)
 
@@ -35,7 +35,7 @@
 
 <a id="text"></a>
 
-## 文字 (5)
+## 文字 (6)
 
 | 效果文件夹 | 介绍 | 预览 |
 | --- | --- | --- |
@@ -44,16 +44,18 @@
 | [彩色流体遮罩](prismatic-fluid-headline/) | 在空心大标题上划过，字母里会卷起流动的彩色，然后慢慢褪掉。 | [在线查看](https://effectatlas.com/zh/effects/prismatic-fluid-headline) |
 | [逐词阅读点亮](reading-word-highlight/) | 随滚动逐词点亮现有文章，并为标记的关键词铺开底纹。 | [在线查看](https://effectatlas.com/zh/effects/reading-word-highlight) |
 | [滚速乱码](scroll-speed-scramble/) | 一行标题，滚得越快，字母乱得越厉害。 | [在线查看](https://effectatlas.com/zh/effects/scroll-speed-scramble) |
+| [弹跳文字入场](scroll-story/) | 滚动触发文字入场，停止滚动也会播完，随后保持清晰可读。 | [在线查看](https://effectatlas.com/zh/effects/scroll-story) |
 
 <a id="nav"></a>
 
-## 菜单 (7)
+## 菜单 (8)
 
 | 效果文件夹 | 介绍 | 预览 |
 | --- | --- | --- |
 | [批注菜单](annotated-menu/) | 悬停在菜单项上，它会被划掉、再手写改一遍，像改过的校样。 | [在线查看](https://effectatlas.com/zh/effects/annotated-menu) |
 | [幕布菜单](curtain-menu/) | 全屏菜单，大字，带实时预览。 | [在线查看](https://effectatlas.com/zh/effects/curtain-menu) |
 | [停靠下拉菜单](dock-menu-dropdown/) | 一条小导航，展开后变成可以滚动的目录。 | [在线查看](https://effectatlas.com/zh/effects/dock-menu-dropdown) |
+| [弹性展开菜单](expanding-dock/) | 点开操作栏，展开导航或设计选项；再次点击收回。 | [在线查看](https://effectatlas.com/zh/effects/expanding-dock) |
 | [细线菜单按钮](hairline-burger/) | 两条线组成的菜单按钮，会折成一个叉。 | [在线查看](https://effectatlas.com/zh/effects/hairline-burger) |
 | [本地时钟胶囊](local-clock-pill/) | 显示本地时间的胶囊，悬停时翻成联系链接。 | [在线查看](https://effectatlas.com/zh/effects/local-clock-pill) |
 | [旋转标签手风琴](rotating-tab-accordion/) | 带竖排标签的服务目录，支持悬停、点击和键盘展开，小屏幕改为纵向排列。 | [在线查看](https://effectatlas.com/zh/effects/rotating-tab-accordion) |
@@ -98,13 +100,15 @@
 
 <a id="gallery"></a>
 
-## 画廊 (6)
+## 画廊 (8)
 
 | 效果文件夹 | 介绍 | 预览 |
 | --- | --- | --- |
 | [弧面画廊](curved-gallery/) | 弯成一面弧墙的画廊，拖一下就转起来。 | [在线查看](https://effectatlas.com/zh/effects/curved-gallery) |
 | [圆盘轮播](disc-carousel/) | 一排斜放的圆盘，一次转过一张。 | [在线查看](https://effectatlas.com/zh/effects/disc-carousel) |
 | [边缘折射色散](edge-refraction-dispersion/) | 在现有内容视口的边缘形成折射和色散，可叠加到滚动区域或轮播上。 | [在线查看](https://effectatlas.com/zh/effects/edge-refraction-dispersion) |
+| [波浪画廊](exploration-gallery/) | 拖动或滚动浏览，点击一项可保留选择。 | [在线查看](https://effectatlas.com/zh/effects/exploration-gallery) |
+| [叠卡轮播](focus-cascade/) | 拖动或点击两侧卡片切换，再点击当前卡片确认选择。 | [在线查看](https://effectatlas.com/zh/effects/focus-cascade) |
 | [悬挂卡片轮播](hanging-card-carousel/) | 一排挂着的卡片，甩一下就晃起来。 | [在线查看](https://effectatlas.com/zh/effects/hanging-card-carousel) |
 | [横向滚轮长条](horizontal-wheel-strip/) | 一条横向长条，滑动时带着惯性。 | [在线查看](https://effectatlas.com/zh/effects/horizontal-wheel-strip) |
 | [惯性拖拽](inertia-drag/) | 可以甩出去的方块，会滑行、倾斜，然后停稳。 | [在线查看](https://effectatlas.com/zh/effects/inertia-drag) |

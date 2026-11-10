@@ -305,6 +305,12 @@
       });
       object.style.height = vertical ? 'auto' : objectHeight + 'px';
       layoutCount++;
+      if (!object.hasAttribute('data-layout-ready')) {
+        // Commit the first complete arrangement before enabling transitions. A
+        // parent may pause this card immediately while it waits below the fold.
+        void object.offsetHeight;
+        object.setAttribute('data-layout-ready', '');
+      }
     }
     function setActive(index) {
       if (api.destroyed) return;
@@ -326,6 +332,7 @@
     }
     function build(next) {
       items = next;
+      object.removeAttribute('data-layout-ready');
       object.replaceChildren();
       entries = [];
       hoverIndex = -1;

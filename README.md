@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 # Effect Atlas
 
 <!-- catalog-summary:start -->
-46 web motion effects in plain JavaScript, written for your AI to build into your site.
+50 web motion effects in plain JavaScript, written for your AI to build into your site.
 <!-- catalog-summary:end -->
 
 [Browse the website](https://effectatlas.com) · [Effect directory](effects/README.md) · [AI integration guide](docs/ai-integration.md)
