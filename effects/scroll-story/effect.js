@@ -211,7 +211,8 @@
       if (!options.params.underline) return;
       const svg = document.createElementNS(ns, "svg");
       svg.classList.add("ea-scroll-story__underline");
-      svg.setAttribute("viewBox", `0 0 ${segment.width} ${segment.height}`);
+      // No viewBox: strokes are drawn in the layer's own CSS pixels, the units offsetLeft/offsetTop report.
+      // Safari can report a taller wrap first; a viewBox taken from that size would shrink every stroke.
       segment.node.append(svg);
       segment.paths = [];
       ranges.forEach(([start, end]) => {
