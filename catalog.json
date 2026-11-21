@@ -98,6 +98,31 @@
       ]
     },
     {
+      "slug": "corner-expanding-menu",
+      "name": "Corner Expanding Menu",
+      "description": "A corner button expands into a menu. Hover to open it, click to keep it open, or press Escape to close.",
+      "nameZh": "角落扩展菜单",
+      "descriptionZh": "悬停展开菜单，点击可固定；移开收回，Esc 关闭。",
+      "categories": [
+        "nav",
+        "hover"
+      ],
+      "directory": "effects/corner-expanding-menu",
+      "preview": "https://effectatlas.com/effects/corner-expanding-menu",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountCornerMenu"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
       "slug": "crop-line-page-transition",
       "name": "Crop-Line Page Transition",
       "description": "Four lines close the page to a cross, then keep going and open the next one.",
@@ -915,6 +940,31 @@
       ]
     },
     {
+      "slug": "rotating-arrow",
+      "name": "Rotating Arrow",
+      "description": "An arrow rotates out beside a link on hover or keyboard focus.",
+      "nameZh": "旋出箭头",
+      "descriptionZh": "悬停或聚焦链接，让箭头从左下角旋出。",
+      "categories": [
+        "hover",
+        "nav"
+      ],
+      "directory": "effects/rotating-arrow",
+      "preview": "https://effectatlas.com/effects/rotating-arrow",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountRotatingArrow"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
       "slug": "rotating-tab-accordion",
       "name": "Rotating Tab Accordion",
       "description": "A service directory with vertical tab labels that opens on hover, click or keyboard input.",
@@ -1181,6 +1231,30 @@
         "script": "effect.js",
         "styles": "effect.css",
         "mount": "mountSmearTrailPreloader"
+      },
+      "dependencies": [],
+      "files": [
+        "effect.css",
+        "effect.js",
+        "index.html"
+      ]
+    },
+    {
+      "slug": "split-rising-fill",
+      "name": "Split Rising Fill",
+      "description": "Colour rises through the label and arrow blocks of a button on hover or keyboard focus.",
+      "nameZh": "双段上涌",
+      "descriptionZh": "悬停或聚焦按钮，观察颜色从下方填满文字块和箭头块。",
+      "categories": [
+        "hover"
+      ],
+      "directory": "effects/split-rising-fill",
+      "preview": "https://effectatlas.com/effects/split-rising-fill",
+      "entry": {
+        "demo": "index.html",
+        "script": "effect.js",
+        "styles": "effect.css",
+        "mount": "mountSplitFill"
       },
       "dependencies": [],
       "files": [

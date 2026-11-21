@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Split Rising Fill</title>
+    <link rel="stylesheet" href="effect.css" />
+    <style>
+      /* Demo host styling. Replace this layout and use your own content. */
+      body {
+        margin: 0;
+        background: #f0f0ef;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+      }
+      main.example {
+        min-height: 100svh;
+        --font: system-ui, sans-serif;
+        --ink: #17181a;
+        --object: #fff;
+        --shadow: 0 0 0 1px rgb(23 24 26 / 6%);
+      }
+      .example {
+        display: grid;
+        place-items: center;
+        container-type: inline-size;
+      }
+      .example * {
+        box-sizing: border-box;
+      }
+      .fill-scene {
+        width: max-content;
+        transform: scale(2.25);
+        transform-origin: center;
+      }
+      .fill-scene [data-effect] {
+        font:
+          500 15px/1.4 system-ui,
+          sans-serif;
+      }
+      @container (max-width:600px) {
+        .example .fill-scene {
+          transform: scale(1.9);
+        }
+        .example .menu-scene {
+          transform: scale(1.5);
+        }
+      }
+      @container (max-width:380px) {
+        .example .fill-scene {
+          transform: scale(1.65);
+        }
+        .example .menu-scene {
+          transform: scale(1.1);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="example" lang="en">
+      <div class="fill-scene"><button type="button" data-effect>Subscribe</button></div>
+    </main>
+    <script src="effect.js"></script>
+    <script>
+      // Replace the labels and link destinations with your own content.
+      const motionOptions = /* EA_OPTIONS_START */ {
+        color: "#4559ff",
+        base: "#f0f0ef",
+        text: "#17181a",
+        radius: 10,
+        duration: 700,
+        height: 48,
+        arrow: true,
+      }; /* EA_OPTIONS_END */
+      const instances = [...document.querySelectorAll("[data-effect]")].map((host) =>
+        mountSplitFill(host, motionOptions),
+      );
+      // Use instance.update(options) to change parameters, then destroy() before removing it.
+      window.addEventListener("pagehide", (event) => {
+        if (!event.persisted) instances.forEach((instance) => instance.destroy());
+      });
+    </script>
+  </body>
+</html>

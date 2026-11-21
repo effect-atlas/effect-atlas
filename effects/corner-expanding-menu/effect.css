@@ -1,0 +1,137 @@
+/* Effect Atlas — Corner Expanding Menu. Put inside a positioned, sized container. */
+.ea-corner-menu {
+  --ea-menu-accent: #4559ff;
+  --ea-menu-surface: #fff;
+  --ea-menu-ink: #17181a;
+  --ea-menu-inset: 24px;
+  position: absolute;
+  bottom: var(--ea-menu-inset);
+  right: var(--ea-menu-inset);
+  width: 60px;
+  height: 40px;
+  color: var(--ea-menu-ink);
+  font: inherit;
+  z-index: 2;
+}
+.ea-corner-menu[data-ea-anchor="left"] {
+  right: auto;
+  left: var(--ea-menu-inset);
+}
+.ea-corner-menu,
+.ea-corner-menu * {
+  box-sizing: border-box;
+}
+.ea-corner-menu .ea-menu-panel {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--ea-menu-surface);
+  box-shadow:
+    0 0 0 1px rgb(23 24 26 / 8%),
+    0 2px 8px rgb(23 24 26 / 6%);
+}
+.ea-corner-menu .ea-menu-content {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 228px;
+  max-height: var(--ea-menu-max-height);
+  padding: 18px 16px 44px;
+}
+.ea-corner-menu[data-ea-anchor="left"] .ea-menu-content {
+  left: 0;
+  right: auto;
+}
+.ea-corner-menu .ea-menu-content nav {
+  display: grid;
+  gap: 3px;
+  max-height: calc(var(--ea-menu-max-height) - 62px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #777f95 transparent;
+}
+.ea-corner-menu .ea-menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 1.25rem;
+  line-height: 1.4;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+.ea-corner-menu .ea-menu-item:is(:hover, :focus-visible) {
+  background: var(--ea-menu-accent);
+  color: #fff;
+  outline: none;
+}
+.ea-corner-menu .ea-menu-trigger {
+  position: absolute;
+  z-index: 1;
+  bottom: 0;
+  right: 0;
+  width: 60px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.ea-corner-menu[data-ea-anchor="left"] .ea-menu-trigger {
+  right: auto;
+  left: 0;
+}
+.ea-corner-menu .ea-menu-trigger:focus-visible {
+  outline: 2px solid var(--ea-menu-accent);
+  outline-offset: 4px;
+}
+.ea-corner-menu .ea-menu-bars {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+.ea-corner-menu .ea-menu-bar {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  height: 1.5px;
+  width: 28px;
+  background: currentColor;
+}
+.ea-corner-menu .ea-menu-bar + .ea-menu-bar {
+  top: 23px;
+}
+.ea-corner-menu .ea-menu-close {
+  width: 15px;
+  height: 15px;
+  opacity: 0;
+}
+@media (pointer: coarse) {
+  .ea-corner-menu .ea-menu-trigger::after {
+    content: "";
+    position: absolute;
+    inset: -2px 0;
+  }
+  .ea-corner-menu .ea-menu-item {
+    min-height: 44px;
+  }
+}

@@ -4,7 +4,7 @@
 
 <!-- Generated from catalog.json by scripts/catalog.mjs. Edit the catalog, then run --write. -->
 
-共 50 个效果。每项在主分类下列出一次；完整的辅助分类、挂载函数和文件依赖见 [catalog.json](../catalog.json)。
+共 53 个效果。每项在主分类下列出一次；完整的辅助分类、挂载函数和文件依赖见 [catalog.json](../catalog.json)。
 
 [光标](#cursor) · [悬停](#hover) · [文字](#text) · [菜单](#nav) · [滚动](#scroll) · [首屏](#hero) · [转场](#trans) · [画廊](#gallery) · [其他](#other)
 
@@ -20,7 +20,7 @@
 
 <a id="hover"></a>
 
-## 悬停 (8)
+## 悬停 (10)
 
 | 效果文件夹 | 介绍 | 预览 |
 | --- | --- | --- |
@@ -29,7 +29,9 @@
 | [链接悬停合集](link-hover-set/) | 两种能直接用在页面上的链接悬停：一种是两条下划线前后追着跑，一种是字母滚动、箭头换一个新的。随便悬停一个链接试试。 | [在线查看](https://effectatlas.com/zh/effects/link-hover-set) |
 | [像素擦除按钮](pixel-wipe-button/) | 悬停时按钮一格一格、一帧一帧地填满。移开时不倒放，而是原来的颜色从左边重新扫回来。随便悬停一个按钮试试。 | [在线查看](https://effectatlas.com/zh/effects/pixel-wipe-button) |
 | [重画箭头](redrawn-arrow-hover/) | 悬停在箭头上：旧箭头滑走、擦掉，新箭头自己画出来。 | [在线查看](https://effectatlas.com/zh/effects/redrawn-arrow-hover) |
+| [旋出箭头](rotating-arrow/) | 悬停或聚焦链接，让箭头从左下角旋出。 | [在线查看](https://effectatlas.com/zh/effects/rotating-arrow) |
 | [手绘圈](scribble-ring/) | 悬停到哪儿，就有一圈手绘线把它圈起来。 | [在线查看](https://effectatlas.com/zh/effects/scribble-ring) |
+| [双段上涌](split-rising-fill/) | 悬停或聚焦按钮，观察颜色从下方填满文字块和箭头块。 | [在线查看](https://effectatlas.com/zh/effects/split-rising-fill) |
 | [叠帧索引](stacked-frame-index/) | 一份索引列表，悬停时缩略图会一帧帧翻过去。 | [在线查看](https://effectatlas.com/zh/effects/stacked-frame-index) |
 | [撕票卡片](tear-off-pricing-ticket/) | 滚动让价格票升上来、翻到正面，再悬停在一张上，把票根撕下来。 | [在线查看](https://effectatlas.com/zh/effects/tear-off-pricing-ticket) |
 
@@ -48,11 +50,12 @@
 
 <a id="nav"></a>
 
-## 菜单 (8)
+## 菜单 (9)
 
 | 效果文件夹 | 介绍 | 预览 |
 | --- | --- | --- |
 | [批注菜单](annotated-menu/) | 悬停在菜单项上，它会被划掉、再手写改一遍，像改过的校样。 | [在线查看](https://effectatlas.com/zh/effects/annotated-menu) |
+| [角落扩展菜单](corner-expanding-menu/) | 悬停展开菜单，点击可固定；移开收回，Esc 关闭。 | [在线查看](https://effectatlas.com/zh/effects/corner-expanding-menu) |
 | [幕布菜单](curtain-menu/) | 全屏菜单，大字，带实时预览。 | [在线查看](https://effectatlas.com/zh/effects/curtain-menu) |
 | [停靠下拉菜单](dock-menu-dropdown/) | 一条小导航，展开后变成可以滚动的目录。 | [在线查看](https://effectatlas.com/zh/effects/dock-menu-dropdown) |
 | [弹性展开菜单](expanding-dock/) | 点开操作栏，展开导航或设计选项；再次点击收回。 | [在线查看](https://effectatlas.com/zh/effects/expanding-dock) |

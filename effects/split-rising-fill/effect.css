@@ -1,0 +1,90 @@
+/* Effect Atlas — Split Rising Fill. Focus outline lives on the unclipped button. */
+.ea-split-fill {
+  --ea-fill-color: #4559ff;
+  --ea-fill-ink: #fff;
+  --ea-fill-base: #fff;
+  --ea-fill-text: #24262e;
+  --ea-fill-duration: 700ms;
+  --ea-fill-radius: 9px;
+  --ea-fill-height: 54px;
+  display: inline-flex;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--ea-fill-height);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ea-fill-text);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  gap: 2px;
+  -webkit-tap-highlight-color: transparent;
+}
+.ea-split-fill .ea-fill-piece {
+  min-width: 0;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  padding: 0.65em 1.1em;
+  border: 1px solid var(--ea-fill-color);
+  border-radius: var(--ea-fill-radius);
+  background: var(--ea-fill-base);
+  transition: border-color 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ea-split-fill .ea-fill-piece::after {
+  content: "";
+  position: absolute;
+  /* Cover the 1px border inset, including on the narrow arrow piece. */
+  inset: -1px;
+  border-radius: inherit;
+  background: var(--ea-fill-color);
+  transform: translateY(104%);
+  transition: transform var(--ea-fill-duration) cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ea-split-fill .ea-fill-label,
+.ea-split-fill .ea-fill-arrow svg {
+  position: relative;
+  z-index: 1;
+  transition: color 200ms;
+}
+.ea-split-fill .ea-fill-label {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+.ea-split-fill .ea-fill-arrow {
+  width: var(--ea-fill-height);
+  padding: 0.5em;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+}
+.ea-split-fill .ea-fill-arrow svg {
+  width: 25px;
+  height: 25px;
+}
+.ea-split-fill[data-ea-active="true"] .ea-fill-piece::after {
+  transform: translateY(0);
+}
+.ea-split-fill[data-ea-active="true"] {
+  color: var(--ea-fill-ink);
+}
+.ea-split-fill[data-ea-arrow="false"] .ea-fill-arrow {
+  display: none;
+}
+.ea-split-fill:focus-visible {
+  outline: 2px solid var(--ea-fill-color);
+  outline-offset: 5px;
+  border-radius: var(--ea-fill-radius);
+}
+.ea-split-fill[data-ea-reduced="true"] .ea-fill-piece::after {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ea-split-fill .ea-fill-piece::after {
+    transition: none;
+  }
+}

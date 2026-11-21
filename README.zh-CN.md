@@ -5,7 +5,7 @@
 # Effect Atlas
 
 <!-- catalog-summary:start -->
-50 个前端动效，原生 JavaScript 编写，写给你的 AI，让它搭进你的网站。
+53 个前端动效，原生 JavaScript 编写，写给你的 AI，让它搭进你的网站。
 <!-- catalog-summary:end -->
 
 [浏览网站](https://effectatlas.com/zh/) · [效果目录](effects/README.zh-CN.md) · [AI 接入指南](docs/ai-integration.zh-CN.md)

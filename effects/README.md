@@ -4,7 +4,7 @@
 
 <!-- Generated from catalog.json by scripts/catalog.mjs. Edit the catalog, then run --write. -->
 
-50 effects. Each appears once under its primary category. Additional categories, mount functions and file dependencies are in [catalog.json](../catalog.json).
+53 effects. Each appears once under its primary category. Additional categories, mount functions and file dependencies are in [catalog.json](../catalog.json).
 
 [Cursor](#cursor) · [Hover](#hover) · [Text](#text) · [Menus](#nav) · [Scroll](#scroll) · [Hero](#hero) · [Transitions](#trans) · [Galleries](#gallery) · [Other](#other)
 
@@ -20,7 +20,7 @@
 
 <a id="hover"></a>
 
-## Hover (8)
+## Hover (10)
 
 | Effect folder | What it does | Preview |
 | --- | --- | --- |
@@ -29,7 +29,9 @@
 | [Link Hover Set](link-hover-set/) | Two link hovers for real pages: a double underline that chases itself, and letters that roll with an arrow that swaps out. Hover any link. | [Live demo](https://effectatlas.com/effects/link-hover-set) |
 | [Pixel Wipe Button](pixel-wipe-button/) | A button hover that fills in square by square, frame by frame. On the way out it never rewinds: the old colour sweeps back in from the left. Hover any button. | [Live demo](https://effectatlas.com/effects/pixel-wipe-button) |
 | [Redrawn Arrow](redrawn-arrow-hover/) | Hover an arrow: the old one slides off and erases, a new one draws itself in. | [Live demo](https://effectatlas.com/effects/redrawn-arrow-hover) |
+| [Rotating Arrow](rotating-arrow/) | An arrow rotates out beside a link on hover or keyboard focus. | [Live demo](https://effectatlas.com/effects/rotating-arrow) |
 | [Scribble Ring](scribble-ring/) | A hand-drawn ring that circles whatever you hover. | [Live demo](https://effectatlas.com/effects/scribble-ring) |
+| [Split Rising Fill](split-rising-fill/) | Colour rises through the label and arrow blocks of a button on hover or keyboard focus. | [Live demo](https://effectatlas.com/effects/split-rising-fill) |
 | [Stacked Frame Index](stacked-frame-index/) | An index whose thumbnails flip through frames on hover. | [Live demo](https://effectatlas.com/effects/stacked-frame-index) |
 | [Tear-Off Pricing Ticket](tear-off-pricing-ticket/) | Scroll to bring the price tickets up and flip them over, then hover one to tear off its stub. | [Live demo](https://effectatlas.com/effects/tear-off-pricing-ticket) |
 
@@ -48,11 +50,12 @@
 
 <a id="nav"></a>
 
-## Menus (8)
+## Menus (9)
 
 | Effect folder | What it does | Preview |
 | --- | --- | --- |
 | [Annotated Menu](annotated-menu/) | Hover a menu item and it gets struck through and rewritten by hand, like a marked-up proof. | [Live demo](https://effectatlas.com/effects/annotated-menu) |
+| [Corner Expanding Menu](corner-expanding-menu/) | A corner button expands into a menu. Hover to open it, click to keep it open, or press Escape to close. | [Live demo](https://effectatlas.com/effects/corner-expanding-menu) |
 | [Curtain Menu](curtain-menu/) | A fullscreen menu with large type and live previews. | [Live demo](https://effectatlas.com/effects/curtain-menu) |
 | [Dock Menu Dropdown](dock-menu-dropdown/) | A compact nav that grows into a scrollable index. | [Live demo](https://effectatlas.com/effects/dock-menu-dropdown) |
 | [Elastic Menu](expanding-dock/) | Open Menu or Design to reveal the actions. Try a palette or a type style. | [Live demo](https://effectatlas.com/effects/expanding-dock) |

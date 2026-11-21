@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Rotating Arrow</title>
+    <link rel="stylesheet" href="effect.css" />
+    <style>
+      /* Demo host styling. Replace this layout and use your own content. */
+      body {
+        margin: 0;
+        background: #f0f0ef;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+      }
+      main.example {
+        min-height: 100svh;
+        --font: system-ui, sans-serif;
+        --ink: #17181a;
+        --object: #fff;
+        --shadow: 0 0 0 1px rgb(23 24 26 / 6%);
+      }
+      .example {
+        display: grid;
+        place-items: center;
+        container-type: inline-size;
+      }
+      .example * {
+        box-sizing: border-box;
+      }
+      .arrow-scene {
+        width: min(436px, calc(100% - 48px));
+        padding: 28px 32px;
+        background: #fff;
+        border-radius: 24px;
+      }
+      .arrow-list {
+        display: flex;
+        flex-direction: column;
+        align-items: start;
+        gap: 10px;
+        font-size: 40px;
+        line-height: 1.15;
+        font-weight: 500;
+        letter-spacing: -0.04em;
+      }
+      @container (max-width:600px) {
+        .example .fill-scene {
+          transform: scale(1.9);
+        }
+        .example .menu-scene {
+          transform: scale(1.5);
+        }
+      }
+      @container (max-width:380px) {
+        .example .fill-scene {
+          transform: scale(1.65);
+        }
+        .example .menu-scene {
+          transform: scale(1.1);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="example" lang="en">
+      <div class="arrow-scene">
+        <nav class="arrow-list" aria-label="Example navigation">
+          <a href="#work" data-effect>Work</a><a href="#about" data-effect>About</a
+          ><a href="#journal" data-effect>Journal</a>
+        </nav>
+      </div>
+    </main>
+    <script src="effect.js"></script>
+    <script>
+      // Replace the labels and link destinations with your own content.
+      const motionOptions = /* EA_OPTIONS_START */ {
+        size: 28,
+        angle: -90,
+        enter: 1000,
+        exit: 300,
+        direction: "right",
+        color: "#4559ff",
+      }; /* EA_OPTIONS_END */
+      const instances = [...document.querySelectorAll("[data-effect]")].map((host) =>
+        mountRotatingArrow(host, motionOptions),
+      );
+      // Use instance.update(options) to change parameters, then destroy() before removing it.
+      window.addEventListener("pagehide", (event) => {
+        if (!event.persisted) instances.forEach((instance) => instance.destroy());
+      });
+    </script>
+  </body>
+</html>

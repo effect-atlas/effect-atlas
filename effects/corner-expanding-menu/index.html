@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Corner Expanding Menu</title>
+    <link rel="stylesheet" href="effect.css" />
+    <style>
+      /* Demo host styling. Replace this layout and use your own content. */
+      body {
+        margin: 0;
+        background: #f0f0ef;
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+      }
+      main.example {
+        min-height: 100svh;
+        --font: system-ui, sans-serif;
+        --ink: #17181a;
+        --object: #fff;
+        --shadow: 0 0 0 1px rgb(23 24 26 / 6%);
+      }
+      .example {
+        display: grid;
+        place-items: center;
+        container-type: inline-size;
+      }
+      .example * {
+        box-sizing: border-box;
+      }
+      .menu-scene {
+        position: relative;
+        width: 272px;
+        height: 240px;
+        transform: scale(1.75);
+        transform-origin: center;
+      }
+      @container (max-width:600px) {
+        .example .fill-scene {
+          transform: scale(1.9);
+        }
+        .example .menu-scene {
+          transform: scale(1.5);
+        }
+      }
+      @container (max-width:380px) {
+        .example .fill-scene {
+          transform: scale(1.65);
+        }
+        .example .menu-scene {
+          transform: scale(1.1);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="example" lang="en">
+      <div class="menu-scene">
+        <div data-effect>
+          <nav aria-label="Example navigation">
+            <a href="#works">Selected work</a><a href="#about">About us</a><a href="#contact">Let’s talk ↗</a>
+          </nav>
+        </div>
+      </div>
+    </main>
+    <script src="effect.js"></script>
+    <script>
+      // Replace the labels and link destinations with your own content.
+      const motionOptions = /* EA_OPTIONS_START */ {
+        width: 228,
+        speed: 1,
+        anchor: "right",
+        accent: "#4559ff",
+        surface: "#fff",
+        ink: "#17181a",
+        inset: 22,
+        openLabel: "Open menu",
+        closeLabel: "Close menu",
+      }; /* EA_OPTIONS_END */
+      const instances = [...document.querySelectorAll("[data-effect]")].map((host) =>
+        mountCornerMenu(host, motionOptions),
+      );
+      // Use instance.update(options) to change parameters, then destroy() before removing it.
+      window.addEventListener("pagehide", (event) => {
+        if (!event.persisted) instances.forEach((instance) => instance.destroy());
+      });
+    </script>
+  </body>
+</html>
